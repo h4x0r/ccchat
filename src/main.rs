@@ -22,7 +22,7 @@ struct Args {
     #[arg(long, env = "CCCHAT_ACCOUNT")]
     account: String,
 
-    /// Comma-separated allowed sender numbers (empty = allow all)
+    /// Comma-separated allowed sender numbers (defaults to your own account number)
     #[arg(long, env = "CCCHAT_ALLOWED")]
     allowed: Option<String>,
 
@@ -40,7 +40,7 @@ struct State {
     http: Client,
     api_url: String,
     account: String,
-    allowed: Option<Vec<String>>,
+    allowed: Vec<String>,
     model: String,
     max_budget: f64,
     start_time: Instant,
@@ -55,10 +55,7 @@ struct SenderState {
 
 impl State {
     fn is_allowed(&self, sender: &str) -> bool {
-        match &self.allowed {
-            None => true,
-            Some(list) => list.iter().any(|n| n == sender),
-        }
+        self.allowed.iter().any(|n| n == sender)
     }
 
     fn add_cost(&self, cost: f64) {
@@ -81,9 +78,21 @@ async fn main() {
         .init();
 
     let args = Args::parse();
-    let allowed = args
-        .allowed
-        .map(|s| s.split(',').map(|n| n.trim().to_string()).collect());
+    let allowed: Vec<String> = match args.allowed {
+        Some(s) => {
+            let list: Vec<String> = s
+                .split(',')
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .collect();
+            if list.is_empty() {
+                vec![args.account.clone()]
+            } else {
+                list
+            }
+        }
+        None => vec![args.account.clone()],
+    };
 
     let state = Arc::new(State {
         sessions: DashMap::new(),
@@ -99,11 +108,7 @@ async fn main() {
     });
 
     info!("ccchat starting for account {}", state.account);
-    if let Some(ref allowed) = state.allowed {
-        info!("Allowed senders: {:?}", allowed);
-    } else {
-        warn!("No sender allowlist configured - accepting messages from everyone");
-    }
+    info!("Allowed senders: {:?}", state.allowed);
 
     let mut backoff = 1u64;
 

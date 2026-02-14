@@ -41,23 +41,16 @@ You send a message. ccchat picks it up, asks Claude, and sends the answer back. 
 cargo install ccchat
 ```
 
-Or build from source:
-
-```bash
-git clone https://github.com/h4x0r/ccchat.git
-cd ccchat
-cargo build --release
-```
-
 ### Run
 
 ```bash
-# Replace with your actual numbers
-ccchat --account +447700000000 --allowed +447700000001
+# Replace with your actual number
+ccchat --account +447700000000
 ```
 
 - `--account` is the number ccchat listens on
-- `--allowed` controls who can use it (comma-separated numbers, or leave it out to allow everyone)
+- By default, only messages from your own number are accepted (notes to self)
+- Use `--allowed` to add other numbers: `--allowed +447700000001,+447700000002`
 
 You can also use environment variables instead of flags:
 
@@ -90,7 +83,7 @@ Everything else you type gets sent to Claude.
 | Setting | Default | What it Does |
 |---------|---------|-------------|
 | `--account` | (required) | Your account identifier |
-| `--allowed` | everyone | Who's allowed to chat |
+| `--allowed` | your own number | Who's allowed to chat |
 | `--model` | opus | Which Claude model to use |
 | `--max-budget` | $5.00 | Maximum spend per message |
 | `--api-url` | localhost:8080 | Messenger API endpoint |
@@ -107,7 +100,7 @@ ccchat itself is free. You pay for Claude API usage through your Anthropic subsc
 - Verify your account number is correct
 
 **"Ignoring message from non-allowed sender"**
-- The sender isn't in your `--allowed` list. Add them or remove the `--allowed` flag entirely.
+- The sender isn't in your `--allowed` list. Add their number with `--allowed`.
 
 **Messages are cut off**
 - Long responses are automatically split into multiple messages. They should arrive in order.
