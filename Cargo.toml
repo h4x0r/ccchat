@@ -1,6 +1,6 @@
 [package]
 name = "ccchat"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Chat with Claude AI from your favourite messenger"
 license = "MIT"
