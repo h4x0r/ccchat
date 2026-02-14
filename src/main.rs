@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -135,6 +136,7 @@ struct State {
 struct SenderState {
     session_id: String,
     model: String,
+    lock: Arc<Mutex<()>>,
 }
 
 impl State {
@@ -466,7 +468,7 @@ async fn connect_and_listen(state: &Arc<State>) -> Result<(), BoxError> {
             source.clone()
         };
 
-        info!("Message from {source}: {}", truncate(&message_text, 80));
+        info!("Message from {source}: {message_text}");
 
         let state = Arc::clone(state);
         tokio::spawn(async move {
@@ -490,18 +492,25 @@ async fn handle_message(state: &State, sender: &str, text: &str) -> Result<(), B
 
     let _ = set_typing(state, sender, true).await;
 
-    let (session_id, model) = {
+    let (session_id, model, lock) = {
         let entry = state.sessions.entry(sender.to_string()).or_insert_with(|| {
             let session_id = uuid::Uuid::new_v4().to_string();
             info!("New session for {sender}: {session_id}");
             SenderState {
                 session_id,
                 model: state.model.clone(),
+                lock: Arc::new(Mutex::new(())),
             }
         });
-        (entry.session_id.clone(), entry.model.clone())
+        (
+            entry.session_id.clone(),
+            entry.model.clone(),
+            entry.lock.clone(),
+        )
     };
 
+    // Serialize claude calls per sender to avoid "session already in use" errors
+    let _guard = lock.lock().await;
     let result = run_claude(state, text, &session_id, &model).await;
 
     let _ = set_typing(state, sender, false).await;
@@ -512,6 +521,7 @@ async fn handle_message(state: &State, sender: &str, text: &str) -> Result<(), B
                 state.add_cost(c);
                 info!("Cost: ${c:.4} (total: ${:.4})", state.total_cost_usd());
             }
+            info!("Reply to {sender}: {response}");
             send_long_message(state, sender, &response).await?;
         }
         Err(e) => {
@@ -611,6 +621,7 @@ fn handle_command(state: &State, sender: &str, text: &str) -> Option<String> {
             .or_insert_with(|| SenderState {
                 session_id: uuid::Uuid::new_v4().to_string(),
                 model: model.clone(),
+                lock: Arc::new(Mutex::new(())),
             });
         entry.model = model.clone();
         return Some(format!("Model switched to: {model}"));
