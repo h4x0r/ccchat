@@ -49,7 +49,7 @@ ccchat --account +447700000000
 ```
 
 - `--account` is the number ccchat listens on
-- By default, only messages from your own number are accepted (notes to self)
+- By default, only messages from your own number are accepted (Note to Self)
 - Use `--allowed` to add other numbers: `--allowed +447700000001,+447700000002`
 
 You can also use environment variables instead of flags:
