@@ -287,9 +287,29 @@ async fn main() {
     // Account owner is always allowed (for admin commands via Note to Self)
     allowed_ids.insert(args.account.clone(), ());
 
+    // Also resolve the account owner's UUID, since linked devices see
+    // Note to Self messages with source=UUID, not sourceNumber.
+    let http = Client::new();
+    if let Ok(resp) = http
+        .get(format!("{api_url}/v1/identities/{}", args.account))
+        .send()
+        .await
+    {
+        if let Ok(identities) = resp.json::<Vec<Value>>().await {
+            for id in &identities {
+                if id["number"].as_str() == Some(&args.account) {
+                    if let Some(uuid) = id["uuid"].as_str() {
+                        info!("Account owner UUID: {uuid}");
+                        allowed_ids.insert(uuid.to_string(), ());
+                    }
+                }
+            }
+        }
+    }
+
     let state = Arc::new(State {
         sessions: DashMap::new(),
-        http: Client::new(),
+        http,
         api_url,
         account: args.account,
         allowed_ids,
