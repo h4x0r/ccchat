@@ -1,25 +1,33 @@
-# C3 - Claude Code Chat over Signal
+# C3 - Claude Code Chat
 
-Chat with Claude AI directly from Signal. Send a message, get an intelligent response — right in your favourite messaging app.
+Chat with Claude AI directly from your favourite messenger. Send a message, get an intelligent response — no browser or app switching required.
 
 ## What is C3?
 
-C3 turns your Signal messenger into a Claude AI chat interface. Instead of opening a browser or a separate app, just text your questions and Claude replies in Signal.
+C3 brings Claude AI into your messaging apps. Instead of opening a separate tool, just text your questions and Claude replies in the same chat.
 
-- Ask questions, get answers — in Signal
+- Ask questions, get answers — right where you message
 - Each person gets their own private conversation that remembers context
 - Choose between different Claude models (Opus, Sonnet, Haiku)
 - Built-in cost tracking so you stay within budget
 
+## Supported Messengers
+
+| Messenger | Status |
+|-----------|--------|
+| Signal | Supported |
+
+More messengers coming soon.
+
 ## How it Works
 
 ```
-You (Signal) → C3 → Claude AI → C3 → You (Signal)
+You (messenger) → C3 → Claude AI → C3 → You (messenger)
 ```
 
-You send a message on Signal. C3 picks it up, asks Claude, and sends the answer back. That's it.
+You send a message. C3 picks it up, asks Claude, and sends the answer back. That's it.
 
-## Quick Start
+## Quick Start (Signal)
 
 ### What You Need
 
@@ -40,7 +48,7 @@ cargo build --release
 ./target/release/c3 --account +447700000000 --allowed +447700000001
 ```
 
-- `--account` is the Signal number C3 listens on
+- `--account` is the number C3 listens on
 - `--allowed` controls who can use it (comma-separated numbers, or leave it out to allow everyone)
 
 ### Using Environment Variables
@@ -57,11 +65,11 @@ Copy `.env.example` to `.env` for a template.
 
 ## Using C3
 
-Once running, just send a message to your C3 Signal number from your phone. Claude will respond in the same chat.
+Once running, just send a message to your C3 number from your phone. Claude will respond in the same chat.
 
-### Special Commands
+### Commands
 
-Type these in Signal to control C3:
+Type these in your chat to control C3:
 
 | Command | What it Does |
 |---------|-------------|
@@ -75,28 +83,28 @@ Everything else you type gets sent to Claude.
 
 | Setting | Default | What it Does |
 |---------|---------|-------------|
-| `--account` | (required) | Your Signal number |
+| `--account` | (required) | Your account identifier |
 | `--allowed` | everyone | Who's allowed to chat |
 | `--model` | opus | Which Claude model to use |
 | `--max-budget` | $5.00 | Maximum spend per message |
-| `--api-url` | localhost:8080 | Where signal-cli-api is running |
+| `--api-url` | localhost:8080 | Messenger API endpoint |
 
 ## How Much Does it Cost?
 
-C3 itself is free. You pay for Claude API usage through your Anthropic subscription. Use `/status` in Signal to check your running total, and `--max-budget` to set a per-message spending cap.
+C3 itself is free. You pay for Claude API usage through your Anthropic subscription. Use `/status` to check your running total, and `--max-budget` to set a per-message spending cap.
 
 ## Troubleshooting
 
 **C3 starts but I don't get replies**
-- Make sure signal-cli-api is running (`curl http://localhost:8080/v1/health`)
+- Make sure your messenger API is running
 - Check that `claude` works on its own (`claude -p "hello"`)
-- Verify your Signal number is correct
+- Verify your account number is correct
 
 **"Ignoring message from non-allowed sender"**
-- The sender's number isn't in your `--allowed` list. Add it or remove the `--allowed` flag entirely.
+- The sender isn't in your `--allowed` list. Add them or remove the `--allowed` flag entirely.
 
 **Messages are cut off**
-- Long responses are automatically split into multiple Signal messages. They should arrive in order.
+- Long responses are automatically split into multiple messages. They should arrive in order.
 
 ## License
 
