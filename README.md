@@ -34,31 +34,37 @@ You send a message. ccchat picks it up, asks Claude, and sends the answer back. 
 1. **A Signal account** linked to [signal-cli](https://github.com/AsamK/signal-cli)
 2. **[signal-cli-api](https://github.com/h4x0r/signal-cli-api)** running on your machine
 3. **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** installed and logged in
-4. **Rust** installed ([rustup.rs](https://rustup.rs))
 
-### Install and Run
+### Install
 
 ```bash
-# Download and build
+cargo install ccchat
+```
+
+Or build from source:
+
+```bash
 git clone https://github.com/h4x0r/ccchat.git
 cd ccchat
 cargo build --release
+```
 
-# Run (replace with your actual numbers)
-./target/release/ccchat --account +447700000000 --allowed +447700000001
+### Run
+
+```bash
+# Replace with your actual numbers
+ccchat --account +447700000000 --allowed +447700000001
 ```
 
 - `--account` is the number ccchat listens on
 - `--allowed` controls who can use it (comma-separated numbers, or leave it out to allow everyone)
 
-### Using Environment Variables
-
-Instead of typing flags every time, you can set environment variables:
+You can also use environment variables instead of flags:
 
 ```bash
 export CCCHAT_ACCOUNT=+447700000000
 export CCCHAT_ALLOWED=+447700000001
-./target/release/ccchat
+ccchat
 ```
 
 Copy `.env.example` to `.env` for a template.
