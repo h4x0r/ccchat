@@ -395,9 +395,23 @@ async fn connect_and_listen(state: &Arc<State>) -> Result<(), BoxError> {
             _ => continue,
         };
 
-        let message_text = match envelope["envelope"]["dataMessage"]["message"].as_str() {
-            Some(m) if !m.is_empty() => m.to_string(),
-            _ => continue,
+        // Extract message text from dataMessage or syncMessage (linked devices)
+        let (message_text, is_sync) = if let Some(m) =
+            envelope["envelope"]["dataMessage"]["message"].as_str()
+        {
+            if m.is_empty() {
+                continue;
+            }
+            (m.to_string(), false)
+        } else if let Some(m) =
+            envelope["envelope"]["syncMessage"]["sentMessage"]["message"].as_str()
+        {
+            if m.is_empty() {
+                continue;
+            }
+            (m.to_string(), true)
+        } else {
+            continue;
         };
 
         // Suppress Note to Self echoes
@@ -414,7 +428,8 @@ async fn connect_and_listen(state: &Arc<State>) -> Result<(), BoxError> {
             .as_str()
             .unwrap_or("unknown");
 
-        if !state.is_allowed(&source) && !state.is_allowed(source_uuid) {
+        // Sync messages are always from the account owner (sent from a linked device)
+        if !is_sync && !state.is_allowed(&source) && !state.is_allowed(source_uuid) {
             let id = if !source_uuid.is_empty() {
                 source_uuid.to_string()
             } else {
@@ -443,14 +458,21 @@ async fn connect_and_listen(state: &Arc<State>) -> Result<(), BoxError> {
         }
 
         state.message_count.fetch_add(1, Ordering::Relaxed);
+
+        // For sync messages, reply to account (Note to Self), not to source UUID
+        let reply_to = if is_sync {
+            state.account.clone()
+        } else {
+            source.clone()
+        };
+
         info!("Message from {source}: {}", truncate(&message_text, 80));
 
         let state = Arc::clone(state);
-        let source = source.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_message(&state, &source, &message_text).await {
-                error!("Error handling message from {source}: {e}");
-                let _ = send_message(&state, &source, &format!("Error: {e}")).await;
+            if let Err(e) = handle_message(&state, &reply_to, &message_text).await {
+                error!("Error handling message from {reply_to}: {e}");
+                let _ = send_message(&state, &reply_to, &format!("Error: {e}")).await;
             }
         });
     }
