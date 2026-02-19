@@ -1,17 +1,18 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::error::AppError;
-use crate::helpers::looks_truncated;
+use crate::helpers::{looks_truncated, merge_messages};
 use crate::memory::{
     export_config, forget_with_counts, format_epoch, inject_context, memory_status, persist_allow,
     persist_revoke, save_memory, search_memory_formatted, store_message_pair,
 };
-use crate::state::{SenderState, State, TokenBucket};
+use crate::signal::{classify_attachment, AttachmentType};
+use crate::state::{PendingSender, SenderState, State, TokenBucket};
 
 fn cmd_status(state: &State) -> String {
     let uptime = state.metrics.start_time.elapsed();
@@ -111,6 +112,10 @@ fn cmd_model(state: &State, sender: &str, model: &str) -> String {
             last_activity: Instant::now(),
         });
     entry.model = model.clone();
+    // Persist preference so it survives session resets
+    if let Ok(conn) = crate::memory::open_memory_db(sender) {
+        crate::memory::save_model_preference(&conn, &model);
+    }
     format!("Model switched to: {model}")
 }
 
@@ -138,9 +143,163 @@ fn cmd_search(sender: &str, query: &str) -> String {
     lines.join("\n")
 }
 
+/// Download and classify attachments, returning file paths and whether audio was found.
+pub(crate) async fn download_attachments(
+    state: &State,
+    reply_to: &str,
+    raw_attachments: &[crate::signal::AttachmentInfo],
+) -> (Vec<PathBuf>, bool) {
+    let mut file_paths = Vec::new();
+    let mut has_audio = false;
+    for att in raw_attachments {
+        match classify_attachment(&att.content_type) {
+            AttachmentType::Image | AttachmentType::Document => {
+                match state.download_attachment(att).await {
+                    Ok(path) => file_paths.push(path),
+                    Err(e) => {
+                        error!("Failed to download attachment {}: {e}", att.id);
+                        let _ = state
+                            .send_message(reply_to, &format!("Failed to download attachment: {e}"))
+                            .await;
+                    }
+                }
+            }
+            AttachmentType::Audio => match state.download_attachment(att).await {
+                Ok(path) => {
+                    has_audio = true;
+                    file_paths.push(path);
+                }
+                Err(e) => {
+                    error!("Failed to download audio {}: {e}", att.id);
+                    let _ = state
+                        .send_message(reply_to, &format!("Failed to download voice message: {e}"))
+                        .await;
+                }
+            },
+            AttachmentType::Other => {
+                info!("Unsupported attachment type: {}", att.content_type);
+                let _ = state
+                    .send_message(
+                        reply_to,
+                        &format!("Unsupported attachment type: {}", att.content_type),
+                    )
+                    .await;
+            }
+        }
+    }
+    (file_paths, has_audio)
+}
+
+/// Handle an unauthorized sender: track as pending, notify admin.
+pub(crate) fn handle_unauthorized(state: &Arc<State>, source: &str, source_name: &str) {
+    let id = source.to_string();
+    let is_new = !state.pending_senders.contains_key(&id);
+    let short_id = if is_new {
+        let sid = state.pending_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        state.pending_senders.insert(
+            id.clone(),
+            PendingSender {
+                name: source_name.to_string(),
+                short_id: sid,
+            },
+        );
+        sid
+    } else {
+        state.pending_senders.get(&id).unwrap().short_id
+    };
+    info!(sender = %id, sender_name = %source_name, short_id = short_id, "Blocked unauthorized sender");
+
+    if is_new {
+        let notify = format!(
+            "New sender blocked: {source_name} ({id})\n\
+             Reply /allow {short_id}"
+        );
+        let state = Arc::clone(state);
+        let account = state.config.account.clone();
+        tokio::spawn(async move {
+            let _ = state.send_message(&account, &notify).await;
+        });
+    }
+}
+
+/// Buffer a message for debounce; spawn flush timer if needed.
+pub(crate) fn buffer_debounced(state: &Arc<State>, reply_to: &str, message_text: &str) {
+    {
+        let mut entry = state
+            .debounce
+            .buffers
+            .entry(reply_to.to_string())
+            .or_insert_with(|| (Vec::new(), Instant::now()));
+        entry.0.push(message_text.to_string());
+        entry.1 = Instant::now();
+    }
+    if state
+        .debounce
+        .active
+        .insert(reply_to.to_string(), ())
+        .is_none()
+    {
+        let state = Arc::clone(state);
+        let reply_to = reply_to.to_string();
+        let debounce_ms = state.config.debounce_ms;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(debounce_ms)).await;
+                let should_flush = state
+                    .debounce
+                    .buffers
+                    .get(&reply_to)
+                    .map(|e| e.1.elapsed() >= Duration::from_millis(debounce_ms))
+                    .unwrap_or(true);
+                if should_flush {
+                    break;
+                }
+            }
+            state.debounce.active.remove(&reply_to);
+            let messages = state
+                .debounce
+                .buffers
+                .remove(&reply_to)
+                .map(|(_, (msgs, _))| msgs)
+                .unwrap_or_default();
+            if messages.is_empty() {
+                return;
+            }
+            let merged = merge_messages(&messages);
+            info!(sender = %reply_to, count = messages.len(), "Debounced messages flushed");
+            if let Err(e) = handle_message(&state, &reply_to, &merged, &[]).await {
+                error!("Error handling message from {reply_to}: {e}");
+                let _ = state
+                    .send_message(&reply_to, &format!("Error: {e}"))
+                    .await;
+            }
+        });
+    }
+}
+
+fn cmd_help() -> String {
+    "ccchat commands:\n\
+     /help - Show this help message\n\
+     /status - Show bot status (uptime, messages, cost)\n\
+     /reset - End current session and start fresh\n\
+     /more - Continue a truncated response\n\
+     /model <name> - Switch Claude model (e.g., haiku, sonnet, opus)\n\
+     /memory - Show stored conversation memory\n\
+     /forget - Clear all stored memory\n\
+     /search <query> - Search conversation history\n\
+     /pending - List blocked senders awaiting approval\n\
+     /allow <id> - Approve a pending sender\n\
+     /revoke <id> - Remove a sender's access\n\
+     /export-config - Export allowed senders as JSON"
+        .to_string()
+}
+
 pub(crate) fn handle_command(state: &State, sender: &str, text: &str) -> Option<String> {
     let text = text.trim();
     // /reset and /more are handled in handle_message (need async)
+    if text == "/help" {
+        return Some(cmd_help());
+    }
     if text == "/status" {
         return Some(cmd_status(state));
     }
@@ -256,10 +415,13 @@ pub(crate) async fn handle_message(
     };
 
     let _guard = lock.lock().await;
+    let system_prompt = state.get_system_prompt(sender);
+    let call_start = Instant::now();
     let result = state
         .claude_runner
-        .run_claude(&prompt, &session_id, &model, attachments, sender, state.config.max_budget)
+        .run_claude(&prompt, &session_id, &model, attachments, sender, state.config.max_budget, &system_prompt)
         .await;
+    state.record_latency(call_start.elapsed().as_millis() as u64);
 
     for path in attachments {
         if let Err(e) = std::fs::remove_file(path) {
@@ -287,6 +449,7 @@ async fn send_claude_response(
         Ok((response, cost)) => {
             if let Some(c) = cost {
                 state.add_cost(c);
+                state.add_sender_cost(sender, c);
                 info!(sender = %sender, cost_usd = c, total_cost_usd = state.total_cost_usd(), "Claude call completed");
             }
             if looks_truncated(&response) {
@@ -305,6 +468,7 @@ async fn send_claude_response(
             Ok(())
         }
         Err(e) => {
+            state.metrics.error_count.fetch_add(1, Ordering::Relaxed);
             state
                 .send_message(sender, &format!("Claude error: {e}"))
                 .await?;
@@ -334,6 +498,7 @@ pub(crate) async fn handle_continuation(
         .map(|s| s.lock.clone())
         .unwrap_or_else(|| Arc::new(Mutex::new(())));
 
+    let system_prompt = state.get_system_prompt(sender);
     let _guard = lock.lock().await;
     let result = state
         .claude_runner
@@ -344,6 +509,7 @@ pub(crate) async fn handle_continuation(
             &[],
             sender,
             state.config.max_budget,
+            &system_prompt,
         )
         .await;
 
@@ -356,9 +522,157 @@ pub(crate) async fn handle_continuation(
 mod tests {
     use super::*;
     use crate::memory::{delete_memory, open_memory_db, store_message};
+    use crate::signal::AttachmentInfo;
     use crate::state::tests::test_state_with;
     use crate::state::PendingSender;
     use crate::traits::{MockClaudeRunner, MockSignalApi};
+
+    // --- latency and error count tests ---
+
+    #[tokio::test]
+    async fn test_handle_message_records_latency() {
+        let mut signal = MockSignalApi::new();
+        signal.expect_set_typing().returning(|_, _| Ok(()));
+        signal.expect_send_msg().returning(|_, _| Ok(()));
+        let mut claude = MockClaudeRunner::new();
+        claude
+            .expect_run_claude()
+            .returning(|_, _, _, _, _, _, _| Ok(("ok".to_string(), None)));
+        let state = test_state_with(signal, claude);
+        let _ = handle_message(&state, "+allowed_user", "hi", &[]).await;
+        assert!(state.metrics.latency_count.load(Ordering::Relaxed) >= 1);
+        // latency_sum_ms should be populated (>= 0 by type, but confirm it was written)
+        let _ = state.metrics.latency_sum_ms.load(Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_error_increments_error_count() {
+        let mut signal = MockSignalApi::new();
+        signal.expect_set_typing().returning(|_, _| Ok(()));
+        signal.expect_send_msg().returning(|_, _| Ok(()));
+        let mut claude = MockClaudeRunner::new();
+        claude
+            .expect_run_claude()
+            .returning(|_, _, _, _, _, _, _| Err("boom".into()));
+        let state = test_state_with(signal, claude);
+        let _ = handle_message(&state, "+allowed_user", "hi", &[]).await;
+        assert_eq!(state.metrics.error_count.load(Ordering::Relaxed), 1);
+    }
+
+    // --- download_attachments tests ---
+
+    #[tokio::test]
+    async fn test_download_attachments_image_success() {
+        let mut signal = MockSignalApi::new();
+        signal.expect_download_attachment().returning(|att| {
+            Ok(PathBuf::from(format!("/tmp/ccchat/test_{}.png", att.id)))
+        });
+        let state = test_state_with(signal, MockClaudeRunner::new());
+        let atts = vec![AttachmentInfo {
+            id: "img1".to_string(),
+            content_type: "image/png".to_string(),
+            filename: Some("photo.png".to_string()),
+            voice_note: false,
+        }];
+        let (paths, has_audio) = download_attachments(&state, "+user", &atts).await;
+        assert_eq!(paths.len(), 1);
+        assert!(!has_audio);
+    }
+
+    #[tokio::test]
+    async fn test_download_attachments_audio_sets_flag() {
+        let mut signal = MockSignalApi::new();
+        signal.expect_download_attachment().returning(|att| {
+            Ok(PathBuf::from(format!("/tmp/ccchat/test_{}.aac", att.id)))
+        });
+        let state = test_state_with(signal, MockClaudeRunner::new());
+        let atts = vec![AttachmentInfo {
+            id: "aud1".to_string(),
+            content_type: "audio/aac".to_string(),
+            filename: None,
+            voice_note: true,
+        }];
+        let (paths, has_audio) = download_attachments(&state, "+user", &atts).await;
+        assert_eq!(paths.len(), 1);
+        assert!(has_audio);
+    }
+
+    #[tokio::test]
+    async fn test_download_attachments_unsupported_sends_notification() {
+        let mut signal = MockSignalApi::new();
+        signal.expect_send_msg().returning(|_, msg| {
+            assert!(msg.contains("Unsupported attachment type"));
+            Ok(())
+        });
+        let state = test_state_with(signal, MockClaudeRunner::new());
+        let atts = vec![AttachmentInfo {
+            id: "vid1".to_string(),
+            content_type: "video/mp4".to_string(),
+            filename: None,
+            voice_note: false,
+        }];
+        let (paths, _) = download_attachments(&state, "+user", &atts).await;
+        assert!(paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_download_attachments_failure_sends_error() {
+        let mut signal = MockSignalApi::new();
+        signal
+            .expect_download_attachment()
+            .returning(|_| Err(AppError::Other("download failed".to_string())));
+        signal.expect_send_msg().returning(|_, msg| {
+            assert!(msg.contains("Failed to download attachment"));
+            Ok(())
+        });
+        let state = test_state_with(signal, MockClaudeRunner::new());
+        let atts = vec![AttachmentInfo {
+            id: "fail1".to_string(),
+            content_type: "image/jpeg".to_string(),
+            filename: None,
+            voice_note: false,
+        }];
+        let (paths, _) = download_attachments(&state, "+user", &atts).await;
+        assert!(paths.is_empty());
+    }
+
+    // --- handle_unauthorized tests ---
+
+    #[tokio::test]
+    async fn test_handle_unauthorized_tracks_pending() {
+        let mut signal = MockSignalApi::new();
+        signal.expect_send_msg().returning(|_, _| Ok(()));
+        let state = Arc::new(test_state_with(signal, MockClaudeRunner::new()));
+        handle_unauthorized(&state, "+stranger", "Stranger");
+        assert!(state.pending_senders.contains_key("+stranger"));
+        tokio::time::sleep(Duration::from_millis(50)).await; // let spawn finish
+    }
+
+    #[tokio::test]
+    async fn test_handle_unauthorized_no_duplicate() {
+        let mut signal = MockSignalApi::new();
+        // Only one notification sent (first time)
+        signal.expect_send_msg().times(1).returning(|_, _| Ok(()));
+        let state = Arc::new(test_state_with(signal, MockClaudeRunner::new()));
+        handle_unauthorized(&state, "+stranger", "Stranger");
+        handle_unauthorized(&state, "+stranger", "Stranger");
+        assert_eq!(state.pending_senders.len(), 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_unauthorized_increments_counter() {
+        let mut signal = MockSignalApi::new();
+        signal.expect_send_msg().returning(|_, _| Ok(()));
+        let state = Arc::new(test_state_with(signal, MockClaudeRunner::new()));
+        handle_unauthorized(&state, "+a", "A");
+        handle_unauthorized(&state, "+b", "B");
+        let a_sid = state.pending_senders.get("+a").unwrap().short_id;
+        let b_sid = state.pending_senders.get("+b").unwrap().short_id;
+        assert_eq!(a_sid, 1);
+        assert_eq!(b_sid, 2);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     #[test]
     fn test_handle_command_status() {
@@ -444,6 +758,19 @@ mod tests {
     }
 
     #[test]
+    fn test_model_command_persists_preference() {
+        let sender = format!("+modcmd_{}", std::process::id());
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        state.allowed_ids.insert(sender.clone(), ());
+        let _ = handle_command(&state, &sender, "/model opus");
+        // Verify persisted to SQLite
+        let conn = crate::memory::open_memory_db(&sender).unwrap();
+        let pref = crate::memory::load_model_preference(&conn);
+        assert_eq!(pref.as_deref(), Some("opus"));
+        crate::memory::delete_memory(&sender);
+    }
+
+    #[test]
     fn test_handle_command_unknown() {
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         let result = handle_command(&state, "+allowed_user", "just a message");
@@ -461,7 +788,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(|_, _, _, _, _, _| Ok(("Hello from Claude!".to_string(), Some(0.01))));
+            .returning(|_, _, _, _, _, _, _| Ok(("Hello from Claude!".to_string(), Some(0.01))));
 
         let state = test_state_with(signal, claude);
         let result = handle_message(&state, "+allowed_user", "Hi there", &[]).await;
@@ -505,7 +832,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(|_, _, _, _, _, _| Ok(("Continued response.".to_string(), Some(0.005))));
+            .returning(|_, _, _, _, _, _, _| Ok(("Continued response.".to_string(), Some(0.005))));
 
         let state = test_state_with(signal, claude);
         // Pre-populate a session and a truncated marker
@@ -576,7 +903,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(|_, _, _, _, _, _| Err("model unavailable".into()));
+            .returning(|_, _, _, _, _, _, _| Err("model unavailable".into()));
 
         let state = test_state_with(signal, claude);
         let result = handle_message(&state, "+allowed_user", "hello", &[]).await;
@@ -594,7 +921,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(move |_, _, _, _, _, _| Ok((long_clone.clone(), Some(0.02))));
+            .returning(move |_, _, _, _, _, _, _| Ok((long_clone.clone(), Some(0.02))));
 
         let state = test_state_with(signal, claude);
         let result = handle_message(&state, "+allowed_user", "explain this", &[]).await;
@@ -612,7 +939,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(|_, _, _, _, _, _| Ok(("response".to_string(), Some(0.05))));
+            .returning(|_, _, _, _, _, _, _| Ok(("response".to_string(), Some(0.05))));
 
         let state = test_state_with(signal, claude);
         let _ = handle_message(&state, "+allowed_user", "msg1", &[]).await;
@@ -628,7 +955,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(|prompt, _, _, _, _, _| {
+            .returning(|prompt, _, _, _, _, _, _| {
                 // Should be called with the user's text (possibly with context prepended)
                 assert!(prompt.contains("hello") || prompt.contains("Previous conversations"));
                 Ok(("reply".to_string(), None))
@@ -665,7 +992,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(|_, _, _, _, _, _| Ok(("more content here.".to_string(), Some(0.01))));
+            .returning(|_, _, _, _, _, _, _| Ok(("more content here.".to_string(), Some(0.01))));
 
         let state = test_state_with(signal, claude);
         state.session_mgr.sessions.insert(
@@ -694,7 +1021,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(move |_, _, _, _, _, _| Ok((long_clone.clone(), None)));
+            .returning(move |_, _, _, _, _, _, _| Ok((long_clone.clone(), None)));
 
         let state = test_state_with(signal, claude);
         let result = handle_continuation(&state, "+allowed_user", "sess-1").await;
@@ -714,7 +1041,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(|_, _, _, _, _, _| Err("timeout".into()));
+            .returning(|_, _, _, _, _, _, _| Err("timeout".into()));
 
         let state = test_state_with(signal, claude);
         let result = handle_continuation(&state, "+allowed_user", "sess-1").await;
@@ -833,12 +1160,12 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .withf(|_, _, _, files, _, _| {
+            .withf(|_, _, _, files, _, _, _| {
                 files.len() == 2
                     && files[0] == PathBuf::from("/tmp/photo.png")
                     && files[1] == PathBuf::from("/tmp/doc.pdf")
             })
-            .returning(|_, _, _, _, _, _| Ok(("I see a photo and a PDF.".to_string(), Some(0.02))));
+            .returning(|_, _, _, _, _, _, _| Ok(("I see a photo and a PDF.".to_string(), Some(0.02))));
 
         let state = test_state_with(signal, claude);
         let attachments = vec![
@@ -860,7 +1187,7 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .returning(move |_, _, _, _, _, _| {
+            .returning(move |_, _, _, _, _, _, _| {
                 let n = call_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let cost = if n == 0 { 0.03 } else { 0.07 };
                 Ok(("reply".to_string(), Some(cost)))
@@ -874,6 +1201,36 @@ mod tests {
             "Expected ~$0.10, got ${:.4}",
             state.total_cost_usd()
         );
+    }
+
+    #[test]
+    fn test_handle_command_help() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        let result = handle_command(&state, "+allowed_user", "/help");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_handle_command_help_lists_commands() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        let text = handle_command(&state, "+allowed_user", "/help").unwrap();
+        let commands = [
+            "/help", "/status", "/reset", "/more", "/model", "/memory",
+            "/forget", "/search", "/pending", "/allow", "/revoke", "/export-config",
+        ];
+        for cmd in &commands {
+            assert!(text.contains(cmd), "Missing command: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_handle_command_help_has_descriptions() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        let text = handle_command(&state, "+allowed_user", "/help").unwrap();
+        // Each line after the header should have " - " separator
+        for line in text.lines().skip(1) {
+            assert!(line.contains(" - "), "Missing description separator in: {line}");
+        }
     }
 
     #[tokio::test]
@@ -896,11 +1253,11 @@ mod tests {
         let mut claude = MockClaudeRunner::new();
         claude
             .expect_run_claude()
-            .withf(|prompt, _, _, _, _, _| {
+            .withf(|prompt, _, _, _, _, _, _| {
                 // New session should include context header AND the user's message
                 prompt.contains("Previous conversations") && prompt.contains("tell me about nginx")
             })
-            .returning(|_, _, _, _, _, _| Ok(("got it".to_string(), None)));
+            .returning(|_, _, _, _, _, _, _| Ok(("got it".to_string(), None)));
 
         let state = test_state_with(signal, claude);
         state.allowed_ids.insert(sender.clone(), ());

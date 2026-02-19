@@ -97,6 +97,26 @@ pub(crate) fn get_oldest_message_ts(conn: &Connection) -> Option<i64> {
     .flatten()
 }
 
+pub(crate) fn save_model_preference(conn: &Connection, model: &str) {
+    let timestamp = crate::helpers::epoch_now();
+    if let Err(e) = conn.execute(
+        "INSERT INTO model_preferences (id, model, updated_at) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET model = excluded.model, updated_at = excluded.updated_at",
+        rusqlite::params![model, timestamp],
+    ) {
+        error!("Failed to save model preference: {e}");
+    }
+}
+
+pub(crate) fn load_model_preference(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT model FROM model_preferences WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 pub(crate) fn purge_old_messages(conn: &Connection, days: u32) {
     let cutoff = crate::helpers::epoch_now() - (days as i64 * crate::constants::SECS_PER_DAY);
     let _ = conn.execute(
@@ -224,6 +244,34 @@ mod tests {
         store_summary(&conn, "Summary 1");
         store_summary(&conn, "Summary 2");
         assert_eq!(get_summary_count(&conn), 2);
+        delete_memory(&sender);
+    }
+
+    #[test]
+    fn test_persist_model_preference_round_trip() {
+        let sender = format!("modelpref_rt_{}", std::process::id());
+        let conn = open_memory_db(&sender).unwrap();
+        assert_eq!(load_model_preference(&conn), None);
+        save_model_preference(&conn, "claude-3-haiku");
+        assert_eq!(load_model_preference(&conn).as_deref(), Some("claude-3-haiku"));
+        delete_memory(&sender);
+    }
+
+    #[test]
+    fn test_persist_model_preference_updates_existing() {
+        let sender = format!("modelpref_upd_{}", std::process::id());
+        let conn = open_memory_db(&sender).unwrap();
+        save_model_preference(&conn, "claude-3-haiku");
+        save_model_preference(&conn, "claude-3-opus");
+        assert_eq!(load_model_preference(&conn).as_deref(), Some("claude-3-opus"));
+        delete_memory(&sender);
+    }
+
+    #[test]
+    fn test_load_model_preference_none_when_absent() {
+        let sender = format!("modelpref_none_{}", std::process::id());
+        let conn = open_memory_db(&sender).unwrap();
+        assert_eq!(load_model_preference(&conn), None);
         delete_memory(&sender);
     }
 }

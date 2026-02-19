@@ -52,7 +52,12 @@ pub(crate) fn open_memory_db(sender: &str) -> Result<Connection, AppError> {
         END;
         CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
-        END;",
+        END;
+        CREATE TABLE IF NOT EXISTS model_preferences (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            model TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );",
     )?;
     migrate_json_to_sqlite(&conn, sender);
     Ok(conn)

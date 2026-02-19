@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -63,6 +63,7 @@ pub(crate) struct Config {
     pub(crate) account: String,
     pub(crate) api_url: String,
     pub(crate) config_path: Option<String>,
+    pub(crate) system_prompt: Option<String>,
 }
 
 /// Runtime metrics (atomic counters).
@@ -70,6 +71,9 @@ pub(crate) struct Metrics {
     pub(crate) start_time: Instant,
     pub(crate) message_count: AtomicU64,
     pub(crate) total_cost: AtomicU64, // stored as microdollars
+    pub(crate) error_count: AtomicU64,
+    pub(crate) latency_sum_ms: AtomicU64,
+    pub(crate) latency_count: AtomicU64,
 }
 
 /// Per-sender session tracking.
@@ -94,6 +98,9 @@ pub(crate) struct State {
     pub(crate) pending_counter: AtomicU64,
     pub(crate) sent_hashes: Arc<DashMap<u64, ()>>,
     pub(crate) rate_limits: DashMap<String, TokenBucket>,
+    pub(crate) sender_costs: DashMap<String, AtomicU64>,
+    pub(crate) sender_prompts: DashMap<String, String>,
+    pub(crate) runtime_system_prompt: RwLock<Option<String>>,
     pub(crate) signal_api: Box<dyn SignalApi>,
     pub(crate) claude_runner: Box<dyn ClaudeRunner>,
 }
@@ -110,6 +117,50 @@ impl State {
 
     pub(crate) fn total_cost_usd(&self) -> f64 {
         self.metrics.total_cost.load(Ordering::Relaxed) as f64 / 1_000_000.0
+    }
+
+    pub(crate) fn add_sender_cost(&self, sender: &str, cost: f64) {
+        let micros = (cost * 1_000_000.0) as u64;
+        self.sender_costs
+            .entry(sender.to_string())
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(micros, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)] // used in tests and stats endpoint
+    pub(crate) fn sender_cost_usd(&self, sender: &str) -> f64 {
+        self.sender_costs
+            .get(sender)
+            .map(|v| v.load(Ordering::Relaxed) as f64 / 1_000_000.0)
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn record_latency(&self, duration_ms: u64) {
+        self.metrics.latency_sum_ms.fetch_add(duration_ms, Ordering::Relaxed);
+        self.metrics.latency_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get the system prompt for a sender. Priority: per-sender > runtime global > config global > default.
+    /// Always appends the NO_MEMORY_PROMPT safety directive.
+    pub(crate) fn get_system_prompt(&self, sender: &str) -> String {
+        let base = if let Some(per_sender) = self.sender_prompts.get(sender) {
+            per_sender.clone()
+        } else if let Some(runtime) = self.runtime_system_prompt.read().ok().and_then(|g| g.clone()) {
+            runtime
+        } else if let Some(ref global) = self.config.system_prompt {
+            global.clone()
+        } else {
+            return crate::NO_MEMORY_PROMPT.to_string();
+        };
+        format!("{base}\n\n{}", crate::NO_MEMORY_PROMPT)
+    }
+
+    pub(crate) fn avg_latency_ms(&self) -> f64 {
+        let count = self.metrics.latency_count.load(Ordering::Relaxed);
+        if count == 0 {
+            return 0.0;
+        }
+        self.metrics.latency_sum_ms.load(Ordering::Relaxed) as f64 / count as f64
     }
 
     pub(crate) async fn send_message(&self, recipient: &str, message: &str) -> Result<(), AppError> {
@@ -139,6 +190,7 @@ impl State {
     /// Get or create a session for a sender. Returns (session_id, model, lock, is_new).
     pub(crate) fn get_or_create_session(&self, sender: &str) -> (String, String, Arc<Mutex<()>>, bool) {
         let is_new = !self.session_mgr.sessions.contains_key(sender);
+        let default_model = self.config.model.clone();
         let mut entry = self
             .session_mgr
             .sessions
@@ -146,9 +198,14 @@ impl State {
             .or_insert_with(|| {
                 let session_id = uuid::Uuid::new_v4().to_string();
                 tracing::info!(sender = %sender, session_id = %session_id, "New session created");
+                // Check for persisted model preference
+                let model = crate::memory::open_memory_db(sender)
+                    .ok()
+                    .and_then(|conn| crate::memory::load_model_preference(&conn))
+                    .unwrap_or(default_model);
                 SenderState {
                     session_id,
-                    model: self.config.model.clone(),
+                    model,
                     lock: Arc::new(Mutex::new(())),
                     last_activity: Instant::now(),
                 }
@@ -179,11 +236,15 @@ pub(crate) mod tests {
                 account: "+1234567890".to_string(),
                 api_url: "http://127.0.0.1:9999".to_string(),
                 config_path: None,
+                system_prompt: None,
             },
             metrics: Metrics {
                 start_time: Instant::now(),
                 message_count: AtomicU64::new(0),
                 total_cost: AtomicU64::new(0),
+                error_count: AtomicU64::new(0),
+                latency_sum_ms: AtomicU64::new(0),
+                latency_count: AtomicU64::new(0),
             },
             session_mgr: SessionManager {
                 sessions: DashMap::new(),
@@ -203,6 +264,9 @@ pub(crate) mod tests {
             pending_counter: AtomicU64::new(0),
             sent_hashes: Arc::new(DashMap::new()),
             rate_limits: DashMap::new(),
+            sender_costs: DashMap::new(),
+            sender_prompts: DashMap::new(),
+            runtime_system_prompt: RwLock::new(None),
             signal_api: Box::new(signal),
             claude_runner: Box::new(claude),
         }
@@ -283,6 +347,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_get_or_create_session_uses_persisted_model() {
+        let sender = format!("+sessmodel_{}", std::process::id());
+        // Pre-persist a model preference
+        let conn = crate::memory::open_memory_db(&sender).unwrap();
+        crate::memory::save_model_preference(&conn, "opus");
+        drop(conn);
+
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        let (_, model, _, _) = state.get_or_create_session(&sender);
+        assert_eq!(model, "opus", "should use persisted model preference");
+        crate::memory::delete_memory(&sender);
+    }
+
+    #[test]
     fn test_add_cost_and_total_cost_usd() {
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         assert!((state.total_cost_usd() - 0.0).abs() < f64::EPSILON);
@@ -298,6 +376,64 @@ pub(crate) mod tests {
         state.add_cost(0.000001);
         assert!(state.total_cost_usd() > 0.0);
         assert!(state.total_cost_usd() < 0.001);
+    }
+
+    // --- system prompt tests ---
+
+    #[test]
+    fn test_get_system_prompt_default() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        let prompt = state.get_system_prompt("+user");
+        assert_eq!(prompt, crate::NO_MEMORY_PROMPT);
+    }
+
+    #[test]
+    fn test_get_system_prompt_custom_global() {
+        let mut state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        state.config.system_prompt = Some("You are a helpful math tutor.".to_string());
+        let prompt = state.get_system_prompt("+user");
+        assert!(prompt.contains("You are a helpful math tutor."));
+        assert!(prompt.contains(crate::NO_MEMORY_PROMPT));
+    }
+
+    #[test]
+    fn test_get_system_prompt_per_sender_override() {
+        let mut state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        state.config.system_prompt = Some("Global prompt.".to_string());
+        state.sender_prompts.insert("+special".to_string(), "VIP prompt.".to_string());
+        // Per-sender should override global
+        let prompt = state.get_system_prompt("+special");
+        assert!(prompt.contains("VIP prompt."));
+        assert!(!prompt.contains("Global prompt."));
+        assert!(prompt.contains(crate::NO_MEMORY_PROMPT));
+        // Other senders still use global
+        let prompt2 = state.get_system_prompt("+normal");
+        assert!(prompt2.contains("Global prompt."));
+    }
+
+    #[test]
+    fn test_metrics_error_count_initial_zero() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        assert_eq!(state.metrics.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_metrics_error_count_increment() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        state.metrics.error_count.fetch_add(1, Ordering::Relaxed);
+        state.metrics.error_count.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(state.metrics.error_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_per_sender_cost_tracking() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        state.add_sender_cost("+user_a", 0.05);
+        state.add_sender_cost("+user_b", 0.10);
+        state.add_sender_cost("+user_a", 0.03);
+        assert!((state.sender_cost_usd("+user_a") - 0.08).abs() < 0.001);
+        assert!((state.sender_cost_usd("+user_b") - 0.10).abs() < 0.001);
+        assert!((state.sender_cost_usd("+unknown") - 0.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
