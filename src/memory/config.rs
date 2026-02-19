@@ -5,6 +5,10 @@ use tracing::error;
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct PersistedAllowed {
     pub(crate) allowed: Vec<AllowedEntry>,
+    #[serde(default)]
+    pub(crate) system_prompt: Option<String>,
+    #[serde(default)]
+    pub(crate) sender_prompts: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -111,6 +115,51 @@ pub(crate) fn reload_config(
     for id in to_remove {
         allowed_ids.remove(&id);
     }
+    (added, removed)
+}
+
+/// Full config reload: updates allowed IDs + system prompts + sender prompts.
+pub(crate) fn reload_config_full(
+    config_path: Option<&str>,
+    account: &str,
+    allowed_ids: &dashmap::DashMap<String, ()>,
+    runtime_system_prompt: &std::sync::RwLock<Option<String>>,
+    sender_prompts: &dashmap::DashMap<String, String>,
+) -> (usize, usize) {
+    let (added, removed) = reload_config(config_path, account, allowed_ids);
+
+    // Parse config file for prompts
+    if let Some(path) = config_path {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return (added, removed),
+        };
+        let parsed: PersistedAllowed = if path.ends_with(".yaml") || path.ends_with(".yml") {
+            serde_yaml::from_str(&contents).unwrap_or_default()
+        } else {
+            serde_json::from_str(&contents).unwrap_or_default()
+        };
+
+        // Update system prompt
+        if let Ok(mut guard) = runtime_system_prompt.write() {
+            *guard = parsed.system_prompt;
+        }
+
+        // Update sender prompts (clear old, insert new)
+        sender_prompts.clear();
+        if let Some(prompts) = parsed.sender_prompts {
+            for (sender, prompt) in prompts {
+                sender_prompts.insert(sender, prompt);
+            }
+        }
+    } else {
+        // No config file: clear runtime overrides
+        if let Ok(mut guard) = runtime_system_prompt.write() {
+            *guard = None;
+        }
+        sender_prompts.clear();
+    }
+
     (added, removed)
 }
 
@@ -450,12 +499,43 @@ mod tests {
     }
 
     #[test]
+    fn test_load_config_with_system_prompt() {
+        let dir = std::env::temp_dir().join(format!("ccchat_sysprompt_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+        let json = serde_json::json!({
+            "allowed": [{"id": "+111", "name": "Alice"}],
+            "system_prompt": "You are a coding assistant."
+        });
+        std::fs::write(&path, json.to_string()).unwrap();
+        let contents = std::fs::read_to_string(path.to_str().unwrap()).unwrap();
+        let parsed: PersistedAllowed = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed.system_prompt, Some("You are a coding assistant.".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_config_without_system_prompt_defaults_none() {
+        let dir = std::env::temp_dir().join(format!("ccchat_noprompt_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+        let json = serde_json::json!({ "allowed": [] });
+        std::fs::write(&path, json.to_string()).unwrap();
+        let contents = std::fs::read_to_string(path.to_str().unwrap()).unwrap();
+        let parsed: PersistedAllowed = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed.system_prompt, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_persisted_allowed_serde_round_trip() {
         let data = PersistedAllowed {
             allowed: vec![
                 AllowedEntry { id: "+111".to_string(), name: "Alice".to_string() },
                 AllowedEntry { id: "+222".to_string(), name: "Bob".to_string() },
             ],
+            system_prompt: None,
+            sender_prompts: None,
         };
         let json = serde_json::to_string(&data).unwrap();
         let loaded: PersistedAllowed = serde_json::from_str(&json).unwrap();
@@ -491,6 +571,8 @@ mod tests {
                 id: "+1111111111".to_string(),
                 name: "Charlie".to_string(),
             }],
+            system_prompt: None,
+            sender_prompts: None,
         };
         let dir = std::env::temp_dir().join(format!("ccchat_test_merge_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -511,6 +593,72 @@ mod tests {
             allowed_ids.insert(entry.id.clone(), ());
         }
         assert_eq!(allowed_ids.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reload_config_updates_system_prompt() {
+        let dir = std::env::temp_dir().join(format!("ccchat_reload_prompt_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+        let json = serde_json::json!({
+            "allowed": [],
+            "system_prompt": "You are a pirate assistant."
+        });
+        std::fs::write(&path, json.to_string()).unwrap();
+
+        let allowed: dashmap::DashMap<String, ()> = dashmap::DashMap::new();
+        allowed.insert("+owner".to_string(), ());
+        let runtime_prompt = std::sync::RwLock::new(None);
+        let sender_prompts: dashmap::DashMap<String, String> = dashmap::DashMap::new();
+
+        reload_config_full(
+            Some(path.to_str().unwrap()),
+            "+owner",
+            &allowed,
+            &runtime_prompt,
+            &sender_prompts,
+        );
+
+        let guard = runtime_prompt.read().unwrap();
+        assert_eq!(guard.as_deref(), Some("You are a pirate assistant."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reload_config_clears_old_sender_prompts() {
+        let dir = std::env::temp_dir().join(format!("ccchat_reload_clear_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+        let json = serde_json::json!({
+            "allowed": [],
+            "sender_prompts": {
+                "+alice": "Be helpful to Alice."
+            }
+        });
+        std::fs::write(&path, json.to_string()).unwrap();
+
+        let allowed: dashmap::DashMap<String, ()> = dashmap::DashMap::new();
+        allowed.insert("+owner".to_string(), ());
+        let runtime_prompt = std::sync::RwLock::new(None);
+        let sender_prompts: dashmap::DashMap<String, String> = dashmap::DashMap::new();
+        // Pre-populate with stale entry
+        sender_prompts.insert("+bob".to_string(), "Old prompt for Bob.".to_string());
+
+        reload_config_full(
+            Some(path.to_str().unwrap()),
+            "+owner",
+            &allowed,
+            &runtime_prompt,
+            &sender_prompts,
+        );
+
+        // +bob should be cleared, +alice should be present
+        assert!(!sender_prompts.contains_key("+bob"), "old sender prompt should be cleared");
+        assert_eq!(
+            sender_prompts.get("+alice").map(|v| v.clone()),
+            Some("Be helpful to Alice.".to_string())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
