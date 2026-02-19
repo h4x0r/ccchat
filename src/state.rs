@@ -187,6 +187,34 @@ impl State {
         self.signal_api.download_attachment(attachment).await
     }
 
+    /// Summarize and save all active sessions on shutdown.
+    pub(crate) async fn shutdown_save_sessions(&self) {
+        let entries: Vec<(String, String, String)> = self
+            .session_mgr
+            .sessions
+            .iter()
+            .map(|e| (e.key().clone(), e.session_id.clone(), e.model.clone()))
+            .collect();
+
+        for (sender, session_id, model) in &entries {
+            match self
+                .claude_runner
+                .summarize_session(session_id, model)
+                .await
+            {
+                Some(summary) => {
+                    crate::memory::save_memory(sender, &summary);
+                    tracing::info!(sender = %sender, "Saved memory on shutdown");
+                }
+                None => {
+                    tracing::warn!(sender = %sender, "No summary produced on shutdown");
+                }
+            }
+        }
+
+        self.session_mgr.sessions.clear();
+    }
+
     /// Get or create a session for a sender. Returns (session_id, model, lock, is_new).
     pub(crate) fn get_or_create_session(&self, sender: &str) -> (String, String, Arc<Mutex<()>>, bool) {
         let is_new = !self.session_mgr.sessions.contains_key(sender);
@@ -451,5 +479,76 @@ pub(crate) mod tests {
         let result = state.send_long_message("+allowed_user", &long_msg).await;
         assert!(result.is_ok());
         assert_eq!(call_count.load(Ordering::Relaxed), 2);
+    }
+
+    // --- shutdown tests ---
+
+    #[tokio::test]
+    async fn test_shutdown_save_sessions_calls_summarize_for_each() {
+        let mut claude = MockClaudeRunner::new();
+        let summarize_count = Arc::new(AtomicU64::new(0));
+        let count_clone = Arc::clone(&summarize_count);
+        claude.expect_summarize_session().returning(move |_, _| {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+            Some("Summary".to_string())
+        });
+
+        let state = test_state_with(MockSignalApi::new(), claude);
+        // Create 2 sessions
+        state.session_mgr.sessions.insert(
+            "+user1".to_string(),
+            SenderState {
+                session_id: "s1".to_string(),
+                model: "sonnet".to_string(),
+                lock: Arc::new(Mutex::new(())),
+                last_activity: Instant::now(),
+            },
+        );
+        state.session_mgr.sessions.insert(
+            "+user2".to_string(),
+            SenderState {
+                session_id: "s2".to_string(),
+                model: "sonnet".to_string(),
+                lock: Arc::new(Mutex::new(())),
+                last_activity: Instant::now(),
+            },
+        );
+
+        state.shutdown_save_sessions().await;
+        assert_eq!(summarize_count.load(Ordering::Relaxed), 2);
+        assert!(state.session_mgr.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_save_sessions_empty_is_noop() {
+        let mut claude = MockClaudeRunner::new();
+        claude.expect_summarize_session().never();
+
+        let state = test_state_with(MockSignalApi::new(), claude);
+        state.shutdown_save_sessions().await;
+        assert!(state.session_mgr.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_save_sessions_handles_summarize_failure() {
+        let mut claude = MockClaudeRunner::new();
+        claude
+            .expect_summarize_session()
+            .returning(|_, _| None); // summarize fails
+
+        let state = test_state_with(MockSignalApi::new(), claude);
+        state.session_mgr.sessions.insert(
+            "+user1".to_string(),
+            SenderState {
+                session_id: "s1".to_string(),
+                model: "sonnet".to_string(),
+                lock: Arc::new(Mutex::new(())),
+                last_activity: Instant::now(),
+            },
+        );
+
+        state.shutdown_save_sessions().await;
+        // Sessions still cleaned up even when summarize returns None
+        assert!(state.session_mgr.sessions.is_empty());
     }
 }

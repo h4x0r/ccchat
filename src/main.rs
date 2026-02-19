@@ -19,15 +19,15 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
-use commands::handle_message;
-use helpers::{find_free_port, is_command, merge_messages, truncate, voice_prompt};
+use commands::{buffer_debounced, download_attachments, handle_message, handle_unauthorized};
+use helpers::{find_free_port, is_command, truncate, voice_prompt};
 use memory::{
     allowed_file_path, load_config_file, load_persisted_allowed, open_memory_db,
-    purge_old_messages, reload_config, save_memory, validate_config_entries,
+    purge_old_messages, reload_config_full, save_memory, validate_config_entries,
 };
-use signal::{classify_attachment, parse_envelope, AttachmentType, ParsedEnvelope};
+use signal::{parse_envelope, ParsedEnvelope};
 use error::AppError;
-use state::{PendingSender, State};
+use state::State;
 use traits::{ClaudeRunnerImpl, SignalApiImpl};
 
 pub(crate) const NO_MEMORY_PROMPT: &str = "IMPORTANT: Do not write to CLAUDE.md, memory files, or any persistent storage. This is a multi-user bot environment. Memory writes would contaminate other users' sessions. Use the conversation context provided to you instead.";
@@ -189,7 +189,7 @@ async fn start_signal_cli_api(
         }
     }
 
-    Err(format!("signal-cli-api failed to start on port {port} within 60s").into())
+    Err(AppError::Signal(format!("signal-cli-api failed to start on port {port} within 60s")))
 }
 
 // --- Main ---
@@ -327,11 +327,15 @@ async fn main() {
             account: args.account,
             api_url,
             config_path: args.config,
+            system_prompt: None,
         },
         metrics: state::Metrics {
             start_time: Instant::now(),
             message_count: AtomicU64::new(0),
             total_cost: AtomicU64::new(0),
+            error_count: AtomicU64::new(0),
+            latency_sum_ms: AtomicU64::new(0),
+            latency_count: AtomicU64::new(0),
         },
         session_mgr: state::SessionManager {
             sessions: DashMap::new(),
@@ -346,6 +350,9 @@ async fn main() {
         pending_counter: AtomicU64::new(0),
         sent_hashes,
         rate_limits: DashMap::new(),
+        sender_costs: DashMap::new(),
+        sender_prompts: DashMap::new(),
+        runtime_system_prompt: std::sync::RwLock::new(None),
         signal_api,
         claude_runner: Box::new(ClaudeRunnerImpl),
     });
@@ -395,13 +402,57 @@ async fn main() {
             loop {
                 sig.recv().await;
                 info!("SIGHUP received, reloading config...");
-                let (added, removed) = reload_config(
+                let (added, removed) = reload_config_full(
                     reload_state.config.config_path.as_deref(),
                     &reload_state.config.account,
                     &reload_state.allowed_ids,
+                    &reload_state.runtime_system_prompt,
+                    &reload_state.sender_prompts,
                 );
                 info!("Config reloaded: +{added} -{removed} senders");
             }
+        });
+    }
+
+    // Spawn graceful shutdown handler (SIGINT/SIGTERM)
+    {
+        let shutdown_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen for ctrl-c");
+            info!("Shutdown signal received, saving active sessions...");
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                shutdown_state.shutdown_save_sessions(),
+            )
+            .await
+            {
+                Ok(()) => info!("Shutdown complete, all sessions saved"),
+                Err(_) => error!("Shutdown timed out after 30s"),
+            }
+            std::process::exit(0);
+        });
+    }
+    #[cfg(unix)]
+    {
+        let shutdown_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut sig =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+            sig.recv().await;
+            info!("SIGTERM received, saving active sessions...");
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                shutdown_state.shutdown_save_sessions(),
+            )
+            .await
+            {
+                Ok(()) => info!("Shutdown complete, all sessions saved"),
+                Err(_) => error!("Shutdown timed out after 30s"),
+            }
+            std::process::exit(0);
         });
     }
 
@@ -449,140 +500,6 @@ async fn main() {
 }
 
 // --- WebSocket message loop ---
-
-/// Download and classify attachments, returning file paths and whether audio was found.
-async fn download_attachments(
-    state: &State,
-    reply_to: &str,
-    raw_attachments: &[signal::AttachmentInfo],
-) -> (Vec<std::path::PathBuf>, bool) {
-    let mut file_paths = Vec::new();
-    let mut has_audio = false;
-    for att in raw_attachments {
-        match classify_attachment(&att.content_type) {
-            AttachmentType::Image | AttachmentType::Document => {
-                match state.download_attachment(att).await {
-                    Ok(path) => file_paths.push(path),
-                    Err(e) => {
-                        error!("Failed to download attachment {}: {e}", att.id);
-                        let _ = state
-                            .send_message(reply_to, &format!("Failed to download attachment: {e}"))
-                            .await;
-                    }
-                }
-            }
-            AttachmentType::Audio => match state.download_attachment(att).await {
-                Ok(path) => {
-                    has_audio = true;
-                    file_paths.push(path);
-                }
-                Err(e) => {
-                    error!("Failed to download audio {}: {e}", att.id);
-                    let _ = state
-                        .send_message(reply_to, &format!("Failed to download voice message: {e}"))
-                        .await;
-                }
-            },
-            AttachmentType::Other => {
-                info!("Unsupported attachment type: {}", att.content_type);
-                let _ = state
-                    .send_message(
-                        reply_to,
-                        &format!("Unsupported attachment type: {}", att.content_type),
-                    )
-                    .await;
-            }
-        }
-    }
-    (file_paths, has_audio)
-}
-
-/// Handle an unauthorized sender: track as pending, notify admin.
-fn handle_unauthorized(state: &Arc<State>, source: &str, source_name: &str) {
-    let id = source.to_string();
-    let is_new = !state.pending_senders.contains_key(&id);
-    let short_id = if is_new {
-        let sid = state.pending_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        state.pending_senders.insert(
-            id.clone(),
-            PendingSender {
-                name: source_name.to_string(),
-                short_id: sid,
-            },
-        );
-        sid
-    } else {
-        state.pending_senders.get(&id).unwrap().short_id
-    };
-    info!(sender = %id, sender_name = %source_name, short_id = short_id, "Blocked unauthorized sender");
-
-    if is_new {
-        let notify = format!(
-            "New sender blocked: {source_name} ({id})\n\
-             Reply /allow {short_id}"
-        );
-        let state = Arc::clone(state);
-        let account = state.config.account.clone();
-        tokio::spawn(async move {
-            let _ = state.send_message(&account, &notify).await;
-        });
-    }
-}
-
-/// Buffer a message for debounce; spawn flush timer if needed.
-fn buffer_debounced(state: &Arc<State>, reply_to: &str, message_text: &str) {
-    {
-        let mut entry = state
-            .debounce
-            .buffers
-            .entry(reply_to.to_string())
-            .or_insert_with(|| (Vec::new(), Instant::now()));
-        entry.0.push(message_text.to_string());
-        entry.1 = Instant::now();
-    }
-    if state
-        .debounce
-        .active
-        .insert(reply_to.to_string(), ())
-        .is_none()
-    {
-        let state = Arc::clone(state);
-        let reply_to = reply_to.to_string();
-        let debounce_ms = state.config.debounce_ms;
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(debounce_ms)).await;
-                let should_flush = state
-                    .debounce
-                    .buffers
-                    .get(&reply_to)
-                    .map(|e| e.1.elapsed() >= Duration::from_millis(debounce_ms))
-                    .unwrap_or(true);
-                if should_flush {
-                    break;
-                }
-            }
-            state.debounce.active.remove(&reply_to);
-            let messages = state
-                .debounce
-                .buffers
-                .remove(&reply_to)
-                .map(|(_, (msgs, _))| msgs)
-                .unwrap_or_default();
-            if messages.is_empty() {
-                return;
-            }
-            let merged = merge_messages(&messages);
-            info!(sender = %reply_to, count = messages.len(), "Debounced messages flushed");
-            if let Err(e) = handle_message(&state, &reply_to, &merged, &[]).await {
-                error!("Error handling message from {reply_to}: {e}");
-                let _ = state
-                    .send_message(&reply_to, &format!("Error: {e}"))
-                    .await;
-            }
-        });
-    }
-}
 
 async fn connect_and_listen(state: &Arc<State>) -> Result<(), AppError> {
     let ws_url = format!(
