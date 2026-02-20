@@ -1793,8 +1793,8 @@ mod tests {
             .expect_run_claude()
             .withf(|_, _, _, files, _, _, _| {
                 files.len() == 2
-                    && files[0] == PathBuf::from("/tmp/photo.png")
-                    && files[1] == PathBuf::from("/tmp/doc.pdf")
+                    && files[0] == std::path::Path::new("/tmp/photo.png")
+                    && files[1] == std::path::Path::new("/tmp/doc.pdf")
             })
             .returning(|_, _, _, _, _, _, _| {
                 Ok(("I see a photo and a PDF.".to_string(), Some(0.02)))
