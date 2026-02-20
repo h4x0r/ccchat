@@ -8,8 +8,9 @@ use tracing::{error, info, warn};
 use crate::error::AppError;
 use crate::helpers::{looks_truncated, merge_messages};
 use crate::memory::{
-    export_config, forget_with_counts, format_epoch, inject_context, memory_status, persist_allow,
-    persist_revoke, save_memory, search_memory_formatted, store_message_pair,
+    export_config, export_messages, forget_with_counts, format_epoch, inject_context,
+    memory_status, persist_allow, persist_revoke, save_memory, search_memory_formatted,
+    store_message_pair,
 };
 use crate::signal::{classify_attachment, AttachmentType};
 use crate::state::{PendingSender, SenderState, State, TokenBucket};
@@ -283,6 +284,13 @@ pub(crate) fn buffer_debounced(state: &Arc<State>, reply_to: &str, message_text:
     }
 }
 
+fn cmd_export(sender: &str) -> String {
+    let Ok(conn) = crate::memory::open_memory_db(sender) else {
+        return "No messages to export.".to_string();
+    };
+    export_messages(&conn, 100)
+}
+
 fn cmd_help() -> String {
     "ccchat commands:\n\
      /help - Show this help message\n\
@@ -293,6 +301,7 @@ fn cmd_help() -> String {
      /memory - Show stored conversation memory\n\
      /forget - Clear all stored memory\n\
      /search <query> - Search conversation history\n\
+     /export - Export conversation history\n\
      /pending - List blocked senders awaiting approval\n\
      /allow <id> - Approve a pending sender\n\
      /revoke <id> - Remove a sender's access\n\
@@ -336,6 +345,9 @@ pub(crate) fn handle_command(state: &State, sender: &str, text: &str) -> Option<
     }
     if text == "/export-config" {
         return Some(export_config(&state.allowed_ids, &state.config.account));
+    }
+    if text == "/export" {
+        return Some(cmd_export(sender));
     }
     None
 }
@@ -1231,6 +1243,19 @@ mod tests {
         // Check that long content was truncated (contains "...")
         let has_truncated = result_lines.iter().any(|l| l.contains("..."));
         assert!(has_truncated, "Expected at least one truncated preview");
+        delete_memory(&sender);
+    }
+
+    #[test]
+    fn test_handle_command_export() {
+        let sender = format!("+export_cmd_{}", std::process::id());
+        let conn = crate::memory::open_memory_db(&sender).unwrap();
+        crate::memory::store_message(&conn, "user", "test export", "sess1");
+        drop(conn);
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        let result = handle_command(&state, &sender, "/export");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Conversation export"));
         delete_memory(&sender);
     }
 

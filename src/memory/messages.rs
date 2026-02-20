@@ -117,6 +117,38 @@ pub(crate) fn load_model_preference(conn: &Connection) -> Option<String> {
     .ok()
 }
 
+pub(crate) fn export_messages(conn: &Connection, limit: usize) -> String {
+    let sql = "SELECT role, content, timestamp FROM messages ORDER BY timestamp DESC LIMIT ?1";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return "Failed to export messages.".to_string();
+    };
+    let rows: Vec<(String, String, i64)> = stmt
+        .query_map(rusqlite::params![limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return "No messages to export.".to_string();
+    }
+    let total = get_message_count(conn);
+    let mut lines = vec![format!(
+        "Conversation export ({total} messages, showing last {}):",
+        rows.len()
+    )];
+    for (role, content, ts) in rows.iter().rev() {
+        let date = crate::memory::format_epoch(*ts as u64);
+        let truncated = if content.len() > 200 {
+            &content[..200]
+        } else {
+            content
+        };
+        lines.push(format!("[{date}] {role}: {truncated}"));
+    }
+    lines.join("\n")
+}
+
 pub(crate) fn purge_old_messages(conn: &Connection, days: u32) {
     let cutoff = crate::helpers::epoch_now() - (days as i64 * crate::constants::SECS_PER_DAY);
     let _ = conn.execute(
@@ -244,6 +276,44 @@ mod tests {
         store_summary(&conn, "Summary 1");
         store_summary(&conn, "Summary 2");
         assert_eq!(get_summary_count(&conn), 2);
+        delete_memory(&sender);
+    }
+
+    #[test]
+    fn test_export_messages_empty() {
+        let sender = format!("export_empty_{}", std::process::id());
+        let conn = open_memory_db(&sender).unwrap();
+        let result = export_messages(&conn, 100);
+        assert_eq!(result, "No messages to export.");
+        delete_memory(&sender);
+    }
+
+    #[test]
+    fn test_export_messages_with_data() {
+        let sender = format!("export_data_{}", std::process::id());
+        let conn = open_memory_db(&sender).unwrap();
+        store_message(&conn, "user", "How do I use Rust?", "sess1");
+        store_message(&conn, "assistant", "Rust is a systems programming language.", "sess1");
+        let result = export_messages(&conn, 100);
+        assert!(result.contains("Conversation export"));
+        assert!(result.contains("2 messages"));
+        assert!(result.contains("user:"));
+        assert!(result.contains("assistant:"));
+        delete_memory(&sender);
+    }
+
+    #[test]
+    fn test_export_messages_limit_100() {
+        let sender = format!("export_limit_{}", std::process::id());
+        let conn = open_memory_db(&sender).unwrap();
+        for i in 1..=150 {
+            store_message(&conn, "user", &format!("Message {i}"), "sess1");
+        }
+        let result = export_messages(&conn, 100);
+        assert!(result.contains("150 messages, showing last 100"));
+        // Count result lines (first line is header, rest are messages)
+        let msg_lines = result.lines().skip(1).count();
+        assert_eq!(msg_lines, 100);
         delete_memory(&sender);
     }
 

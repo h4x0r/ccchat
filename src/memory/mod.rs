@@ -11,7 +11,7 @@ pub(crate) use config::{
     persist_revoke, reload_config_full, validate_config_entries,
 };
 pub(crate) use context::{format_epoch, inject_context, save_memory, store_message_pair};
-pub(crate) use messages::{load_model_preference, purge_old_messages, save_model_preference};
+pub(crate) use messages::{export_messages, load_model_preference, purge_old_messages, save_model_preference};
 pub(crate) use schema::{hash_sender, open_memory_db};
 
 #[cfg(test)]
