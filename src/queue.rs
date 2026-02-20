@@ -1,4 +1,3 @@
-#![allow(dead_code)] // Queue functions will be wired into retry loop
 use rusqlite::Connection;
 use tracing::error;
 

@@ -441,15 +441,17 @@ pub(crate) async fn handle_message(
         store_message_pair(sender, text, response, &session_id);
     }
 
-    send_claude_response(state, sender, result, &session_id).await
+    send_claude_response(state, sender, result, &session_id, &prompt).await
 }
 
 /// Send a Claude response: check truncation, store session for /more if needed, send to user.
+/// On error, enqueues the original prompt for background retry.
 async fn send_claude_response(
     state: &State,
     sender: &str,
     result: Result<(String, Option<f64>), AppError>,
     session_id: &str,
+    original_prompt: &str,
 ) -> Result<(), AppError> {
     match result {
         Ok((response, cost)) => {
@@ -489,6 +491,12 @@ async fn send_claude_response(
         }
         Err(e) => {
             state.metrics.error_count.fetch_add(1, Ordering::Relaxed);
+            // Enqueue for background retry
+            if !original_prompt.is_empty() {
+                if let Ok(qconn) = crate::queue::open_queue_db() {
+                    crate::queue::enqueue(&qconn, sender, original_prompt, "[]");
+                }
+            }
             state
                 .send_message(sender, &format!("Claude error: {e}"))
                 .await?;
@@ -535,7 +543,47 @@ pub(crate) async fn handle_continuation(
 
     let _ = state.set_typing(sender, false).await;
 
-    send_claude_response(state, sender, result, session_id).await
+    send_claude_response(state, sender, result, session_id, "continue from where you left off").await
+}
+
+/// Retry pending messages from the queue. Called periodically by the background loop.
+pub(crate) async fn retry_pending_messages(state: &State) {
+    let Ok(qconn) = crate::queue::open_queue_db() else {
+        return;
+    };
+    for (id, sender, content, _attachments) in crate::queue::get_pending(&qconn) {
+        let (session_id, model, lock, _is_new) = state.get_or_create_session(&sender);
+        let system_prompt = state.get_system_prompt(&sender);
+        let _guard = lock.lock().await;
+        match state
+            .claude_runner
+            .run_claude(
+                &content,
+                &session_id,
+                &model,
+                &[],
+                &sender,
+                state.config.max_budget,
+                &system_prompt,
+            )
+            .await
+        {
+            Ok(result) => {
+                if let Err(e) = send_claude_response(state, &sender, Ok(result), &session_id, "")
+                    .await
+                {
+                    warn!("Retry send failed for {sender}: {e}");
+                    crate::queue::increment_retry(&qconn, id);
+                } else {
+                    crate::queue::mark_completed(&qconn, id);
+                }
+            }
+            Err(_) => {
+                crate::queue::increment_retry(&qconn, id);
+            }
+        }
+    }
+    crate::queue::purge_completed(&qconn);
 }
 
 #[cfg(test)]
@@ -1309,6 +1357,119 @@ mod tests {
         let state = test_state_with(signal, claude);
         let _ = handle_message(&state, "+allowed_user", "make a png", &[]).await;
         let _ = std::fs::remove_file(&test_file);
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_on_claude_error() {
+        let mut signal = MockSignalApi::new();
+        signal.expect_set_typing().returning(|_, _| Ok(()));
+        signal.expect_send_msg().returning(|_, _| Ok(()));
+        let mut claude = MockClaudeRunner::new();
+        claude
+            .expect_run_claude()
+            .returning(|_, _, _, _, _, _, _| Err("model unavailable".into()));
+        let state = test_state_with(signal, claude);
+        let _ = handle_message(&state, "+allowed_user", "enqueue me", &[]).await;
+        // Verify it was enqueued
+        let conn = crate::queue::open_queue_db().unwrap();
+        let pending = crate::queue::get_pending(&conn);
+        let found = pending.iter().any(|(_, s, c, _)| s == "+allowed_user" && c.contains("enqueue me"));
+        assert!(found, "Expected prompt to be enqueued, pending: {pending:?}");
+        // Cleanup
+        for (id, _, _, _) in &pending {
+            crate::queue::mark_completed(&conn, *id);
+        }
+        crate::queue::purge_completed(&conn);
+    }
+
+    #[tokio::test]
+    async fn test_retry_loop_processes_pending() {
+        let conn = crate::queue::open_queue_db().unwrap();
+        let sender = format!("+retry_ok_{}", std::process::id());
+        crate::queue::enqueue(&conn, &sender, "retry this", "[]");
+        let id = crate::queue::get_pending(&conn).last().unwrap().0;
+
+        let mut signal = MockSignalApi::new();
+        signal.expect_set_typing().returning(|_, _| Ok(()));
+        signal.expect_send_msg().returning(|_, _| Ok(()));
+        let mut claude = MockClaudeRunner::new();
+        claude
+            .expect_run_claude()
+            .returning(|_, _, _, _, _, _, _| Ok(("retry success".to_string(), None)));
+        let state = test_state_with(signal, claude);
+        state.allowed_ids.insert(sender.clone(), ());
+
+        retry_pending_messages(&state).await;
+
+        // Verify completed (purged)
+        let pending = crate::queue::get_pending(&conn);
+        assert!(!pending.iter().any(|(pid, _, _, _)| *pid == id), "should be completed");
+    }
+
+    #[tokio::test]
+    async fn test_retry_loop_increments_on_failure() {
+        let conn = crate::queue::open_queue_db().unwrap();
+        let uid = uuid::Uuid::new_v4();
+        let sender = format!("+retry_fail_{uid}");
+        crate::queue::enqueue(&conn, &sender, "will fail", "[]");
+        let id = crate::queue::get_pending(&conn)
+            .iter()
+            .find(|(_, s, _, _)| *s == sender)
+            .unwrap()
+            .0;
+
+        let mut signal = MockSignalApi::new();
+        signal.expect_set_typing().returning(|_, _| Ok(()));
+        let mut claude = MockClaudeRunner::new();
+        claude
+            .expect_run_claude()
+            .returning(|_, _, _, _, _, _, _| Err("still broken".into()));
+        let state = test_state_with(signal, claude);
+        // Only allow this unique sender so retry only processes our entry
+        state.allowed_ids.clear();
+        state.allowed_ids.insert(sender.clone(), ());
+
+        retry_pending_messages(&state).await;
+
+        // Verify retry_count incremented
+        let count: i64 = conn
+            .query_row(
+                "SELECT retry_count FROM message_queue WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        // Cleanup
+        crate::queue::mark_completed(&conn, id);
+        crate::queue::purge_completed(&conn);
+    }
+
+    #[tokio::test]
+    async fn test_retry_loop_skips_max_retries() {
+        let conn = crate::queue::open_queue_db().unwrap();
+        let uid = uuid::Uuid::new_v4();
+        let sender = format!("+retry_max_{uid}");
+        crate::queue::enqueue(&conn, &sender, "maxed out", "[]");
+        let id = crate::queue::get_pending(&conn)
+            .iter()
+            .find(|(_, s, _, _)| *s == sender)
+            .unwrap()
+            .0;
+        // Set retry_count to MAX_RETRIES
+        for _ in 0..crate::queue::MAX_RETRIES {
+            crate::queue::increment_retry(&conn, id);
+        }
+
+        // Verify it's excluded from pending
+        let pending = crate::queue::get_pending(&conn);
+        assert!(
+            !pending.iter().any(|(_, s, _, _)| *s == sender),
+            "should be excluded after MAX_RETRIES"
+        );
+
+        // Cleanup
+        conn.execute("DELETE FROM message_queue WHERE id = ?1", rusqlite::params![id]).unwrap();
     }
 
     #[tokio::test]

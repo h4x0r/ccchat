@@ -474,6 +474,17 @@ async fn main() {
         info!("Debounce: {}ms", state.config.debounce_ms);
     }
 
+    // Spawn queue retry loop (every 30s)
+    {
+        let retry_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                commands::retry_pending_messages(&retry_state).await;
+            }
+        });
+    }
+
     // Spawn stats HTTP server if configured
     if args.stats_port > 0 {
         let stats_listener =
