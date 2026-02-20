@@ -25,6 +25,8 @@ futures-util = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
 base64 = "0.22"
+croner = "3"
+chrono = "0.4"
 
 [dev-dependencies]
 mockall = "0.13"
