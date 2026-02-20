@@ -182,9 +182,7 @@ pub(crate) fn validate_config_entries(entries: &[AllowedEntry]) -> Vec<String> {
     for entry in entries {
         if entry.id.is_empty() {
             warnings.push(format!("empty id (name: {:?})", entry.name));
-        } else if !entry.id.starts_with('+')
-            && !(entry.id.len() == 36 && entry.id.contains('-'))
-        {
+        } else if !(entry.id.starts_with('+') || entry.id.len() == 36 && entry.id.contains('-')) {
             warnings.push(format!(
                 "{:?} doesn't look like phone number or UUID",
                 entry.id
@@ -325,7 +323,10 @@ mod tests {
         allowed.insert("+owner".to_string(), ());
 
         let (_, _) = reload_config(Some(path.to_str().unwrap()), "+owner", &allowed);
-        assert!(allowed.contains_key("+owner"), "owner must never be removed");
+        assert!(
+            allowed.contains_key("+owner"),
+            "owner must never be removed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -336,7 +337,11 @@ mod tests {
         allowed.insert("+existing".to_string(), ());
 
         // Point to non-existent file
-        let (added, removed) = reload_config(Some("/tmp/ccchat_nonexistent_reload.json"), "+owner", &allowed);
+        let (added, removed) = reload_config(
+            Some("/tmp/ccchat_nonexistent_reload.json"),
+            "+owner",
+            &allowed,
+        );
         assert_eq!(added, 0);
         assert_eq!(removed, 0);
         // State unchanged
@@ -362,14 +367,22 @@ mod tests {
         let result = export_config(&allowed, "+owner");
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let entries = parsed["allowed"].as_array().unwrap();
-        assert!(entries.iter().all(|e| e["id"].as_str().unwrap() != "+owner"));
+        assert!(entries
+            .iter()
+            .all(|e| e["id"].as_str().unwrap() != "+owner"));
     }
 
     #[test]
     fn test_validate_entries_valid_e164() {
         let entries = vec![
-            AllowedEntry { id: "+447911123456".to_string(), name: "UK".to_string() },
-            AllowedEntry { id: "+12025551234".to_string(), name: "US".to_string() },
+            AllowedEntry {
+                id: "+447911123456".to_string(),
+                name: "UK".to_string(),
+            },
+            AllowedEntry {
+                id: "+12025551234".to_string(),
+                name: "US".to_string(),
+            },
         ];
         assert!(validate_config_entries(&entries).is_empty());
     }
@@ -408,8 +421,14 @@ mod tests {
     #[test]
     fn test_validate_entries_duplicates() {
         let entries = vec![
-            AllowedEntry { id: "+111".to_string(), name: "A".to_string() },
-            AllowedEntry { id: "+111".to_string(), name: "B".to_string() },
+            AllowedEntry {
+                id: "+111".to_string(),
+                name: "A".to_string(),
+            },
+            AllowedEntry {
+                id: "+111".to_string(),
+                name: "B".to_string(),
+            },
         ];
         let warnings = validate_config_entries(&entries);
         assert!(warnings.iter().any(|w| w.contains("duplicate")));
@@ -510,7 +529,10 @@ mod tests {
         std::fs::write(&path, json.to_string()).unwrap();
         let contents = std::fs::read_to_string(path.to_str().unwrap()).unwrap();
         let parsed: PersistedAllowed = serde_json::from_str(&contents).unwrap();
-        assert_eq!(parsed.system_prompt, Some("You are a coding assistant.".to_string()));
+        assert_eq!(
+            parsed.system_prompt,
+            Some("You are a coding assistant.".to_string())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -531,8 +553,14 @@ mod tests {
     fn test_persisted_allowed_serde_round_trip() {
         let data = PersistedAllowed {
             allowed: vec![
-                AllowedEntry { id: "+111".to_string(), name: "Alice".to_string() },
-                AllowedEntry { id: "+222".to_string(), name: "Bob".to_string() },
+                AllowedEntry {
+                    id: "+111".to_string(),
+                    name: "Alice".to_string(),
+                },
+                AllowedEntry {
+                    id: "+222".to_string(),
+                    name: "Bob".to_string(),
+                },
             ],
             system_prompt: None,
             sender_prompts: None,
@@ -544,7 +572,11 @@ mod tests {
         assert_eq!(loaded.allowed[1].name, "Bob");
 
         // Simulate revoke by filtering
-        let after_revoke: Vec<_> = loaded.allowed.into_iter().filter(|e| e.id != "+111").collect();
+        let after_revoke: Vec<_> = loaded
+            .allowed
+            .into_iter()
+            .filter(|e| e.id != "+111")
+            .collect();
         assert_eq!(after_revoke.len(), 1);
         assert_eq!(after_revoke[0].id, "+222");
     }
@@ -654,7 +686,10 @@ mod tests {
         );
 
         // +bob should be cleared, +alice should be present
-        assert!(!sender_prompts.contains_key("+bob"), "old sender prompt should be cleared");
+        assert!(
+            !sender_prompts.contains_key("+bob"),
+            "old sender prompt should be cleared"
+        );
         assert_eq!(
             sender_prompts.get("+alice").map(|v| v.clone()),
             Some("Be helpful to Alice.".to_string())

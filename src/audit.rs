@@ -44,7 +44,7 @@ pub(crate) fn get_recent_actions(limit: usize) -> Vec<(String, String, String, i
     let Ok(conn) = open_audit_db() else {
         return Vec::new();
     };
-    let sql = "SELECT action, target_id, detail, timestamp FROM audit_log ORDER BY timestamp DESC LIMIT ?1";
+    let sql = "SELECT action, target_id, detail, timestamp FROM audit_log ORDER BY timestamp DESC, id DESC LIMIT ?1";
     let Ok(mut stmt) = conn.prepare(sql) else {
         return Vec::new();
     };
@@ -101,6 +101,10 @@ mod tests {
             log_action(&format!("limit_{uid}_{i}"), "", "");
         }
         let actions = get_recent_actions(3);
-        assert!(actions.len() <= 3, "Expected at most 3, got {}", actions.len());
+        assert!(
+            actions.len() <= 3,
+            "Expected at most 3, got {}",
+            actions.len()
+        );
     }
 }

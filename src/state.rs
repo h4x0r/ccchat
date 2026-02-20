@@ -142,7 +142,9 @@ impl State {
     }
 
     pub(crate) fn record_latency(&self, duration_ms: u64) {
-        self.metrics.latency_sum_ms.fetch_add(duration_ms, Ordering::Relaxed);
+        self.metrics
+            .latency_sum_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
         self.metrics.latency_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -151,7 +153,12 @@ impl State {
     pub(crate) fn get_system_prompt(&self, sender: &str) -> String {
         let base = if let Some(per_sender) = self.sender_prompts.get(sender) {
             per_sender.clone()
-        } else if let Some(runtime) = self.runtime_system_prompt.read().ok().and_then(|g| g.clone()) {
+        } else if let Some(runtime) = self
+            .runtime_system_prompt
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+        {
             runtime
         } else if let Some(ref global) = self.config.system_prompt {
             global.clone()
@@ -169,12 +176,20 @@ impl State {
         self.metrics.latency_sum_ms.load(Ordering::Relaxed) as f64 / count as f64
     }
 
-    pub(crate) async fn send_message(&self, recipient: &str, message: &str) -> Result<(), AppError> {
+    pub(crate) async fn send_message(
+        &self,
+        recipient: &str,
+        message: &str,
+    ) -> Result<(), AppError> {
         self.sent_hashes.insert(hash_message(message), ());
         self.signal_api.send_msg(recipient, message).await
     }
 
-    pub(crate) async fn send_long_message(&self, recipient: &str, message: &str) -> Result<(), AppError> {
+    pub(crate) async fn send_long_message(
+        &self,
+        recipient: &str,
+        message: &str,
+    ) -> Result<(), AppError> {
         let parts = split_message(message, crate::constants::MAX_SIGNAL_MSG_LEN);
         for (i, part) in parts.iter().enumerate() {
             if i > 0 {
@@ -189,7 +204,10 @@ impl State {
         self.signal_api.set_typing(recipient, typing).await
     }
 
-    pub(crate) async fn download_attachment(&self, attachment: &AttachmentInfo) -> Result<PathBuf, AppError> {
+    pub(crate) async fn download_attachment(
+        &self,
+        attachment: &AttachmentInfo,
+    ) -> Result<PathBuf, AppError> {
         self.signal_api.download_attachment(attachment).await
     }
 
@@ -222,7 +240,10 @@ impl State {
     }
 
     /// Get or create a session for a sender. Returns (session_id, model, lock, is_new).
-    pub(crate) fn get_or_create_session(&self, sender: &str) -> (String, String, Arc<Mutex<()>>, bool) {
+    pub(crate) fn get_or_create_session(
+        &self,
+        sender: &str,
+    ) -> (String, String, Arc<Mutex<()>>, bool) {
         let is_new = !self.session_mgr.sessions.contains_key(sender);
         let default_model = self.config.model.clone();
         let mut entry = self
@@ -439,7 +460,9 @@ pub(crate) mod tests {
     fn test_get_system_prompt_per_sender_override() {
         let mut state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         state.config.system_prompt = Some("Global prompt.".to_string());
-        state.sender_prompts.insert("+special".to_string(), "VIP prompt.".to_string());
+        state
+            .sender_prompts
+            .insert("+special".to_string(), "VIP prompt.".to_string());
         // Per-sender should override global
         let prompt = state.get_system_prompt("+special");
         assert!(prompt.contains("VIP prompt."));
@@ -545,9 +568,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_shutdown_save_sessions_handles_summarize_failure() {
         let mut claude = MockClaudeRunner::new();
-        claude
-            .expect_summarize_session()
-            .returning(|_, _| None); // summarize fails
+        claude.expect_summarize_session().returning(|_, _| None); // summarize fails
 
         let state = test_state_with(MockSignalApi::new(), claude);
         state.session_mgr.sessions.insert(

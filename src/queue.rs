@@ -33,12 +33,7 @@ pub(crate) fn open_queue_db() -> Result<Connection, AppError> {
     Ok(conn)
 }
 
-pub(crate) fn enqueue(
-    conn: &Connection,
-    sender: &str,
-    content: &str,
-    attachments_json: &str,
-) {
+pub(crate) fn enqueue(conn: &Connection, sender: &str, content: &str, attachments_json: &str) {
     let timestamp = crate::helpers::epoch_now();
     if let Err(e) = conn.execute(
         "INSERT INTO message_queue (sender, content, attachments_json, timestamp) VALUES (?1, ?2, ?3, ?4)",

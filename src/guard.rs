@@ -143,7 +143,11 @@ async fn run_judge(message: &str, http: &Client) -> JudgeResult {
         Ok(resp) => match resp.json::<Value>().await {
             Err(e) => JudgeResult::Error(format!("parse error: {e}")),
             Ok(data) => {
-                let text = data["content"][0]["text"].as_str().unwrap_or("").trim().to_string();
+                let text = data["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 if text.contains("(A)") {
                     JudgeResult::Clean
                 } else if text.contains("(B)") {
@@ -155,10 +159,6 @@ async fn run_judge(message: &str, http: &Client) -> JudgeResult {
             }
         },
     }
-}
-
-pub(crate) fn rejection_message() -> &'static str {
-    REJECTION_MESSAGE
 }
 
 #[cfg(test)]
@@ -178,7 +178,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v2/guard"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"flagged": false})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"flagged": false})),
+            )
             .mount(&server)
             .await;
 
@@ -198,13 +200,13 @@ mod tests {
         // Lakera returns flagged=true
         Mock::given(method("POST"))
             .and(path("/v2/guard"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"flagged": true})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"flagged": true})),
+            )
             .mount(&server)
             .await;
 
-        let http = Client::builder()
-            .build()
-            .unwrap();
+        let http = Client::builder().build().unwrap();
 
         // We can't easily re-route LAKERA_API_URL in unit tests without DI,
         // so verify the overall guard structure compiles and types are correct.
@@ -248,7 +250,7 @@ mod tests {
     #[test]
     fn test_rejection_message_is_vague() {
         // Rejection message must not reveal detection mechanism
-        let msg = rejection_message();
+        let msg = REJECTION_MESSAGE;
         assert!(!msg.is_empty());
         assert!(!msg.to_lowercase().contains("lakera"));
         assert!(!msg.to_lowercase().contains("injection"));

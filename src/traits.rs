@@ -26,6 +26,7 @@ pub(crate) trait SignalApi: Send + Sync {
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub(crate) trait ClaudeRunner: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn run_claude(
         &self,
         prompt: &str,
@@ -90,7 +91,7 @@ impl SignalApi for SignalApiImpl {
             .filename
             .as_deref()
             .and_then(|f| f.rsplit('.').next())
-            .or_else(|| match attachment.content_type.as_str() {
+            .or(match attachment.content_type.as_str() {
                 "image/jpeg" => Some("jpg"),
                 "image/png" => Some("png"),
                 "image/gif" => Some("gif"),
@@ -106,7 +107,12 @@ impl SignalApi for SignalApiImpl {
             })
             .unwrap_or("bin");
 
-        let path = tmp_dir.join(format!("{}_{}.{}", attachment.id, uuid::Uuid::new_v4(), ext));
+        let path = tmp_dir.join(format!(
+            "{}_{}.{}",
+            attachment.id,
+            uuid::Uuid::new_v4(),
+            ext
+        ));
 
         let url = format!("{}/v1/attachments/{}", self.api_url, attachment.id);
         let resp = self.http.get(&url).send().await?;
@@ -164,6 +170,7 @@ pub(crate) struct ClaudeRunnerImpl;
 
 #[async_trait]
 impl ClaudeRunner for ClaudeRunnerImpl {
+    #[allow(clippy::too_many_arguments)]
     async fn run_claude(
         &self,
         prompt: &str,
@@ -200,7 +207,10 @@ impl ClaudeRunner for ClaudeRunnerImpl {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AppError::Claude(format!("claude exited with {}: {stderr}", output.status)));
+            return Err(AppError::Claude(format!(
+                "claude exited with {}: {stderr}",
+                output.status
+            )));
         }
 
         let stdout = String::from_utf8(output.stdout)?;
@@ -283,9 +293,7 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/v2/send"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(500).set_body_string("Internal error"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("Internal error"))
             .mount(&server)
             .await;
         let api = SignalApiImpl {
@@ -298,8 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_signal_api_set_typing_on() {
-        let (_server, api) =
-            setup_wiremock("PUT", "/v1/typing-indicator/+1234567890", 204).await;
+        let (_server, api) = setup_wiremock("PUT", "/v1/typing-indicator/+1234567890", 204).await;
         assert!(api.set_typing("+recipient", true).await.is_ok());
     }
 
@@ -400,7 +407,10 @@ mod tests {
         };
 
         for i in 1..=3 {
-            assert!(api.send_msg("+recipient", &format!("Part {i}")).await.is_ok());
+            assert!(api
+                .send_msg("+recipient", &format!("Part {i}"))
+                .await
+                .is_ok());
         }
     }
 

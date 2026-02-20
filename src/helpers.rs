@@ -170,7 +170,8 @@ pub(crate) fn extract_file_references(text: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for word in text.split_whitespace() {
         // Strip common surrounding punctuation
-        let cleaned = word.trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == '(' || c == ')');
+        let cleaned =
+            word.trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == '(' || c == ')');
         if cleaned.starts_with(prefix) {
             let path = PathBuf::from(cleaned);
             if path.is_file() {
@@ -464,15 +465,30 @@ mod tests {
 
     #[test]
     fn test_content_type_from_extension_png() {
-        assert_eq!(content_type_from_extension(std::path::Path::new("image.png")), "image/png");
-        assert_eq!(content_type_from_extension(std::path::Path::new("photo.jpg")), "image/jpeg");
-        assert_eq!(content_type_from_extension(std::path::Path::new("doc.pdf")), "application/pdf");
+        assert_eq!(
+            content_type_from_extension(std::path::Path::new("image.png")),
+            "image/png"
+        );
+        assert_eq!(
+            content_type_from_extension(std::path::Path::new("photo.jpg")),
+            "image/jpeg"
+        );
+        assert_eq!(
+            content_type_from_extension(std::path::Path::new("doc.pdf")),
+            "application/pdf"
+        );
     }
 
     #[test]
     fn test_content_type_from_extension_unknown() {
-        assert_eq!(content_type_from_extension(std::path::Path::new("file.xyz")), "application/octet-stream");
-        assert_eq!(content_type_from_extension(std::path::Path::new("noext")), "application/octet-stream");
+        assert_eq!(
+            content_type_from_extension(std::path::Path::new("file.xyz")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            content_type_from_extension(std::path::Path::new("noext")),
+            "application/octet-stream"
+        );
     }
 
     #[test]

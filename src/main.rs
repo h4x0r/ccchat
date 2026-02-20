@@ -1,8 +1,8 @@
 mod audit;
 mod commands;
 mod constants;
-mod guard;
 mod error;
+mod guard;
 mod helpers;
 mod memory;
 mod queue;
@@ -25,13 +25,13 @@ use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 use commands::{buffer_debounced, download_attachments, handle_message, handle_unauthorized};
+use error::AppError;
 use helpers::{find_free_port, is_command, truncate, voice_prompt};
 use memory::{
     allowed_file_path, load_config_file, load_persisted_allowed, open_memory_db,
     purge_old_messages, reload_config_full, save_memory, validate_config_entries,
 };
 use signal::{parse_envelope, ParsedEnvelope};
-use error::AppError;
 use state::State;
 use traits::{ClaudeRunnerImpl, SignalApiImpl};
 
@@ -89,16 +89,12 @@ struct Args {
     /// Webhook URL for event notifications (POST JSON)
     #[arg(long, env = "CCCHAT_WEBHOOK_URL")]
     webhook_url: Option<String>,
-
 }
 
 // --- signal-cli-api lifecycle ---
 
 async fn ensure_signal_cli_api() -> Result<String, AppError> {
-    let check = Command::new("which")
-        .arg("signal-cli-api")
-        .output()
-        .await?;
+    let check = Command::new("which").arg("signal-cli-api").output().await?;
 
     if check.status.success() {
         let path = String::from_utf8(check.stdout)?.trim().to_string();
@@ -117,10 +113,7 @@ async fn ensure_signal_cli_api() -> Result<String, AppError> {
         return Err("Failed to install signal-cli-api via cargo install".into());
     }
 
-    let check = Command::new("which")
-        .arg("signal-cli-api")
-        .output()
-        .await?;
+    let check = Command::new("which").arg("signal-cli-api").output().await?;
 
     if check.status.success() {
         let path = String::from_utf8(check.stdout)?.trim().to_string();
@@ -199,7 +192,9 @@ async fn start_signal_cli_api(
         }
     }
 
-    Err(AppError::Signal(format!("signal-cli-api failed to start on port {port} within 60s")))
+    Err(AppError::Signal(format!(
+        "signal-cli-api failed to start on port {port} within 60s"
+    )))
 }
 
 // --- Main ---
@@ -272,7 +267,10 @@ async fn main() {
                     info!(id = %entry.id, name = %entry.name, "Loaded allowed sender from config");
                     allowed_ids.insert(entry.id.clone(), ());
                 }
-                info!(count = entries.len(), "Loaded allowed senders from config file");
+                info!(
+                    count = entries.len(),
+                    "Loaded allowed senders from config file"
+                );
             }
             Err(e) => {
                 error!("{e}");
@@ -438,7 +436,12 @@ async fn main() {
                 .await
                 .expect("Failed to listen for ctrl-c");
             audit::log_action("shutdown", "", "graceful");
-            webhook::fire_if_configured(&shutdown_state.config.webhook_url, "shutdown", "", "graceful");
+            webhook::fire_if_configured(
+                &shutdown_state.config.webhook_url,
+                "shutdown",
+                "",
+                "graceful",
+            );
             info!("Shutdown signal received, saving active sessions...");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
@@ -456,9 +459,8 @@ async fn main() {
     {
         let shutdown_state = Arc::clone(&state);
         tokio::spawn(async move {
-            let mut sig =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("Failed to register SIGTERM handler");
+            let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to register SIGTERM handler");
             sig.recv().await;
             audit::log_action("shutdown", "", "SIGTERM");
             info!("SIGTERM received, saving active sessions...");
@@ -527,10 +529,9 @@ async fn main() {
 
     // Spawn stats HTTP server if configured
     if args.stats_port > 0 {
-        let stats_listener =
-            tokio::net::TcpListener::bind(("127.0.0.1", args.stats_port))
-                .await
-                .expect("Failed to bind stats port");
+        let stats_listener = tokio::net::TcpListener::bind(("127.0.0.1", args.stats_port))
+            .await
+            .expect("Failed to bind stats port");
         let stats_state = state.clone();
         tokio::spawn(stats::run_stats_server(stats_listener, stats_state));
     }
@@ -641,12 +642,9 @@ async fn connect_and_listen(state: &Arc<State>) -> Result<(), AppError> {
                 } else {
                     message_text
                 };
-                if let Err(e) = handle_message(&state, &reply_to, &final_text, &file_paths).await
-                {
+                if let Err(e) = handle_message(&state, &reply_to, &final_text, &file_paths).await {
                     error!("Error handling message from {reply_to}: {e}");
-                    let _ = state
-                        .send_message(&reply_to, &format!("Error: {e}"))
-                        .await;
+                    let _ = state.send_message(&reply_to, &format!("Error: {e}")).await;
                 }
             });
         } else {
@@ -699,14 +697,9 @@ mod tests {
     fn test_log_format_arbitrary_value_accepted() {
         // The field is a free-form String, so any value is accepted at the parse level.
         // The match in main() treats anything other than "json" as text (the default branch).
-        let args = Args::try_parse_from([
-            "ccchat",
-            "--account",
-            "+1234567890",
-            "--log-format",
-            "yaml",
-        ])
-        .expect("parse failed");
+        let args =
+            Args::try_parse_from(["ccchat", "--account", "+1234567890", "--log-format", "yaml"])
+                .expect("parse failed");
         assert_eq!(args.log_format, "yaml");
     }
 

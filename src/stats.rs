@@ -86,7 +86,10 @@ pub(crate) async fn run_stats_server(listener: TcpListener, state: Arc<State>) {
             let (body, content_type) = if path == "/healthz" {
                 (build_health_json(&state).to_string(), "application/json")
             } else if path == "/metrics" {
-                (build_prometheus_metrics(&state), "text/plain; version=0.0.4; charset=utf-8")
+                (
+                    build_prometheus_metrics(&state),
+                    "text/plain; version=0.0.4; charset=utf-8",
+                )
             } else {
                 (build_stats_json(&state).to_string(), "application/json")
             };
@@ -307,7 +310,10 @@ mod tests {
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         state.metrics.message_count.store(42, Ordering::Relaxed);
         let metrics = build_prometheus_metrics(&state);
-        assert!(metrics.contains("ccchat_messages_total 42"), "got: {metrics}");
+        assert!(
+            metrics.contains("ccchat_messages_total 42"),
+            "got: {metrics}"
+        );
     }
 
     #[test]
@@ -330,7 +336,10 @@ mod tests {
     fn test_prometheus_metrics_has_sessions() {
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         let metrics = build_prometheus_metrics(&state);
-        assert!(metrics.contains("ccchat_active_sessions 0"), "got: {metrics}");
+        assert!(
+            metrics.contains("ccchat_active_sessions 0"),
+            "got: {metrics}"
+        );
     }
 
     #[test]

@@ -62,7 +62,8 @@ pub(crate) fn add_reminder(conn: &Connection, sender: &str, message: &str, deliv
 
 pub(crate) fn get_due_reminders(conn: &Connection) -> Vec<(i64, String, String)> {
     let now = crate::helpers::epoch_now();
-    let sql = "SELECT id, sender, message FROM reminders WHERE status = 'pending' AND deliver_at <= ?1";
+    let sql =
+        "SELECT id, sender, message FROM reminders WHERE status = 'pending' AND deliver_at <= ?1";
     let Ok(mut stmt) = conn.prepare(sql) else {
         return Vec::new();
     };
@@ -124,7 +125,12 @@ fn compute_next_cron_delivery(cron_pattern: &str) -> Option<i64> {
     Some(next.timestamp())
 }
 
-pub(crate) fn add_cron_job(conn: &Connection, sender: &str, message: &str, cron_pattern: &str) -> i64 {
+pub(crate) fn add_cron_job(
+    conn: &Connection,
+    sender: &str,
+    message: &str,
+    cron_pattern: &str,
+) -> i64 {
     let next = match compute_next_cron_delivery(cron_pattern) {
         Some(ts) => ts,
         None => return 0,
@@ -140,7 +146,12 @@ pub(crate) fn add_cron_job(conn: &Connection, sender: &str, message: &str, cron_
     conn.last_insert_rowid()
 }
 
-pub(crate) fn add_interval_job(conn: &Connection, sender: &str, message: &str, interval_secs: i64) -> i64 {
+pub(crate) fn add_interval_job(
+    conn: &Connection,
+    sender: &str,
+    message: &str,
+    interval_secs: i64,
+) -> i64 {
     let now = crate::helpers::epoch_now();
     let next = now + interval_secs;
     if let Err(e) = conn.execute(
@@ -154,7 +165,10 @@ pub(crate) fn add_interval_job(conn: &Connection, sender: &str, message: &str, i
 }
 
 /// Returns due cron jobs: (id, sender, message, cron_pattern, interval_secs).
-pub(crate) fn get_due_cron_jobs(conn: &Connection) -> Vec<(i64, String, String, Option<String>, Option<i64>)> {
+#[allow(clippy::type_complexity)]
+pub(crate) fn get_due_cron_jobs(
+    conn: &Connection,
+) -> Vec<(i64, String, String, Option<String>, Option<i64>)> {
     let now = crate::helpers::epoch_now();
     let sql = "SELECT id, sender, message, cron_pattern, interval_secs FROM cron_jobs WHERE status = 'active' AND next_delivery_at <= ?1";
     let Ok(mut stmt) = conn.prepare(sql) else {
@@ -174,7 +188,12 @@ pub(crate) fn get_due_cron_jobs(conn: &Connection) -> Vec<(i64, String, String, 
     .unwrap_or_default()
 }
 
-pub(crate) fn advance_cron_job(conn: &Connection, id: i64, cron_pattern: Option<&str>, interval_secs: Option<i64>) {
+pub(crate) fn advance_cron_job(
+    conn: &Connection,
+    id: i64,
+    cron_pattern: Option<&str>,
+    interval_secs: Option<i64>,
+) {
     let now = crate::helpers::epoch_now();
     let next = if let Some(pattern) = cron_pattern {
         compute_next_cron_delivery(pattern).unwrap_or(now + 3600)
@@ -190,7 +209,11 @@ pub(crate) fn advance_cron_job(conn: &Connection, id: i64, cron_pattern: Option<
 }
 
 /// Returns active cron jobs for a sender: (id, message, job_type, cron_pattern, interval_secs, next_delivery_at).
-pub(crate) fn get_active_cron_jobs(conn: &Connection, sender: &str) -> Vec<(i64, String, String, Option<String>, Option<i64>, i64)> {
+#[allow(clippy::type_complexity)]
+pub(crate) fn get_active_cron_jobs(
+    conn: &Connection,
+    sender: &str,
+) -> Vec<(i64, String, String, Option<String>, Option<i64>, i64)> {
     let sql = "SELECT id, message, job_type, cron_pattern, interval_secs, next_delivery_at FROM cron_jobs WHERE sender = ?1 AND status = 'active' ORDER BY next_delivery_at";
     let Ok(mut stmt) = conn.prepare(sql) else {
         return Vec::new();
@@ -468,20 +491,29 @@ mod tests {
     fn test_advance_cron_job_updates_next_delivery() {
         let conn = test_schedule_db();
         let id = add_cron_job(&conn, "+user", "daily", "0 9 * * *");
-        let before: i64 = conn.query_row(
-            "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
-            rusqlite::params![id], |row| row.get(0),
-        ).unwrap();
+        let before: i64 = conn
+            .query_row(
+                "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         advance_cron_job(&conn, id, Some("0 9 * * *"), None);
-        let after: i64 = conn.query_row(
-            "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
-            rusqlite::params![id], |row| row.get(0),
-        ).unwrap();
+        let after: i64 = conn
+            .query_row(
+                "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(after >= before, "next_delivery_at should advance");
-        let delivered: Option<i64> = conn.query_row(
-            "SELECT last_delivered_at FROM cron_jobs WHERE id = ?1",
-            rusqlite::params![id], |row| row.get(0),
-        ).unwrap();
+        let delivered: Option<i64> = conn
+            .query_row(
+                "SELECT last_delivered_at FROM cron_jobs WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(delivered.is_some(), "last_delivered_at should be set");
     }
 
@@ -489,16 +521,25 @@ mod tests {
     fn test_advance_interval_job_updates_next_delivery() {
         let conn = test_schedule_db();
         let id = add_interval_job(&conn, "+user", "ping", 60);
-        let before: i64 = conn.query_row(
-            "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
-            rusqlite::params![id], |row| row.get(0),
-        ).unwrap();
+        let before: i64 = conn
+            .query_row(
+                "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         advance_cron_job(&conn, id, None, Some(60));
-        let after: i64 = conn.query_row(
-            "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
-            rusqlite::params![id], |row| row.get(0),
-        ).unwrap();
-        assert!(after >= before, "next_delivery_at should advance for interval job");
+        let after: i64 = conn
+            .query_row(
+                "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            after >= before,
+            "next_delivery_at should advance for interval job"
+        );
     }
 
     #[test]
@@ -525,7 +566,10 @@ mod tests {
         let id = add_interval_job(&conn, "+user", "pause me", 60);
         assert!(pause_cron_job(&conn, id, "+user"));
         let jobs = get_active_cron_jobs(&conn, "+user");
-        assert!(jobs.is_empty(), "paused job should not appear in active list");
+        assert!(
+            jobs.is_empty(),
+            "paused job should not appear in active list"
+        );
     }
 
     #[test]
@@ -537,7 +581,10 @@ mod tests {
         let jobs = get_active_cron_jobs(&conn, "+user");
         assert_eq!(jobs.len(), 1);
         let now = crate::helpers::epoch_now();
-        assert!(jobs[0].5 > now, "next_delivery_at should be in the future after resume");
+        assert!(
+            jobs[0].5 > now,
+            "next_delivery_at should be in the future after resume"
+        );
     }
 
     #[test]

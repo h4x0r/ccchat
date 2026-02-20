@@ -1,6 +1,6 @@
 use tracing::error;
 
-use super::messages::{search_memory, store_message, store_summary, get_recent_summaries};
+use super::messages::{get_recent_summaries, search_memory, store_message, store_summary};
 use super::schema::{memory_db_path, memory_json_path, open_memory_db};
 
 pub(crate) fn save_memory(sender: &str, summary: &str) {
@@ -58,7 +58,12 @@ pub(crate) fn inject_context(sender: &str, text: &str) -> String {
     ctx
 }
 
-pub(crate) fn store_message_pair(sender: &str, user_msg: &str, assistant_msg: &str, session_id: &str) {
+pub(crate) fn store_message_pair(
+    sender: &str,
+    user_msg: &str,
+    assistant_msg: &str,
+    session_id: &str,
+) {
     match open_memory_db(sender) {
         Ok(conn) => {
             store_message(&conn, "user", user_msg, session_id);
@@ -88,7 +93,16 @@ pub(crate) fn format_epoch(epoch: u64) -> String {
     let days_in_months: [i64; 12] = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let mut m = 0usize;
     for (i, &dim) in days_in_months.iter().enumerate() {
@@ -137,7 +151,12 @@ mod tests {
         let sender = format!("ctx_msg_{}", std::process::id());
         let conn = open_memory_db(&sender).unwrap();
         store_message(&conn, "user", "How do I configure nginx?", "sess1");
-        store_message(&conn, "assistant", "Edit /etc/nginx/nginx.conf for main config.", "sess1");
+        store_message(
+            &conn,
+            "assistant",
+            "Edit /etc/nginx/nginx.conf for main config.",
+            "sess1",
+        );
         drop(conn);
         let result = inject_context(&sender, "Tell me about nginx");
         assert!(result.contains("Relevant past messages:"));

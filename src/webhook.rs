@@ -98,6 +98,10 @@ mod tests {
         let start = std::time::Instant::now();
         fire_webhook("http://192.0.2.1:1/nonexistent", "test", "+user", "");
         let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() < 50, "fire_webhook should not block, took {}ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() < 50,
+            "fire_webhook should not block, took {}ms",
+            elapsed.as_millis()
+        );
     }
 }

@@ -1,7 +1,10 @@
 use tracing::error;
 
 use super::context::{delete_memory, format_epoch};
-use super::messages::{get_message_count, get_oldest_message_ts, get_recent_summaries, get_summary_count, search_memory};
+use super::messages::{
+    get_message_count, get_oldest_message_ts, get_recent_summaries, get_summary_count,
+    search_memory,
+};
 use super::schema::open_memory_db;
 
 pub(crate) fn memory_status(sender: &str) -> String {
@@ -45,7 +48,11 @@ pub(crate) fn memory_status(sender: &str) -> String {
     out
 }
 
-pub(crate) fn search_memory_formatted(sender: &str, query: &str, limit: usize) -> Vec<(String, String, i64)> {
+pub(crate) fn search_memory_formatted(
+    sender: &str,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, String, i64)> {
     match open_memory_db(sender) {
         Ok(conn) => search_memory(&conn, query, limit),
         Err(e) => {
@@ -73,8 +80,8 @@ pub(crate) fn forget_with_counts(sender: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{open_memory_db, save_memory};
     use crate::memory::schema::memory_db_path;
+    use crate::memory::{open_memory_db, save_memory};
 
     #[test]
     fn test_memory_command_no_data() {
@@ -90,7 +97,12 @@ mod tests {
         save_memory(&sender, "Discussed async Rust patterns.");
         let conn = open_memory_db(&sender).unwrap();
         crate::memory::messages::store_message(&conn, "user", "How does tokio work?", "sess1");
-        crate::memory::messages::store_message(&conn, "assistant", "Tokio is an async runtime for Rust.", "sess1");
+        crate::memory::messages::store_message(
+            &conn,
+            "assistant",
+            "Tokio is an async runtime for Rust.",
+            "sess1",
+        );
         drop(conn);
         let result = memory_status(&sender);
         assert!(result.contains("Stored messages: 2"));

@@ -22,10 +22,10 @@ pub(crate) fn parse_envelope(envelope: &Value) -> Option<ParsedEnvelope> {
 
     let has_data_attachments = envelope["envelope"]["dataMessage"]["attachments"]
         .as_array()
-        .map_or(false, |a| !a.is_empty());
+        .is_some_and(|a| !a.is_empty());
     let has_sync_attachments = envelope["envelope"]["syncMessage"]["sentMessage"]["attachments"]
         .as_array()
-        .map_or(false, |a| !a.is_empty());
+        .is_some_and(|a| !a.is_empty());
 
     let (message_text, is_sync) = if let Some(m) =
         envelope["envelope"]["dataMessage"]["message"].as_str()
@@ -34,9 +34,7 @@ pub(crate) fn parse_envelope(envelope: &Value) -> Option<ParsedEnvelope> {
             return None;
         }
         (m.to_string(), false)
-    } else if let Some(m) =
-        envelope["envelope"]["syncMessage"]["sentMessage"]["message"].as_str()
-    {
+    } else if let Some(m) = envelope["envelope"]["syncMessage"]["sentMessage"]["message"].as_str() {
         if m.is_empty() && !has_sync_attachments {
             return None;
         }

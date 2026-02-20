@@ -71,9 +71,7 @@ fn cmd_allow(state: &State, arg: &str) -> String {
                 state.pending_senders.remove(&rid);
                 (rid, name)
             }
-            None => {
-                return format!("No pending sender #{num}.\nUse /pending to see the list.")
-            }
+            None => return format!("No pending sender #{num}.\nUse /pending to see the list."),
         }
     } else {
         let id = arg.to_string();
@@ -279,9 +277,7 @@ pub(crate) fn buffer_debounced(state: &Arc<State>, reply_to: &str, message_text:
             info!(sender = %reply_to, count = messages.len(), "Debounced messages flushed");
             if let Err(e) = handle_message(&state, &reply_to, &merged, &[]).await {
                 error!("Error handling message from {reply_to}: {e}");
-                let _ = state
-                    .send_message(&reply_to, &format!("Error: {e}"))
-                    .await;
+                let _ = state.send_message(&reply_to, &format!("Error: {e}")).await;
             }
         });
     }
@@ -339,10 +335,8 @@ fn cmd_pin(sender: &str, label: &str) -> String {
     let Ok(conn) = crate::memory::open_memory_db(sender) else {
         return "Failed to access memory.".to_string();
     };
-    let messages = crate::memory::messages::get_recent_messages(
-        &conn,
-        crate::constants::PIN_MESSAGE_COUNT,
-    );
+    let messages =
+        crate::memory::messages::get_recent_messages(&conn, crate::constants::PIN_MESSAGE_COUNT);
     if messages.is_empty() {
         return "No recent messages to pin.".to_string();
     }
@@ -380,9 +374,7 @@ fn cmd_recall(state: &State, sender: &str, label: &str) -> String {
     };
     match crate::memory::messages::get_pin(&conn, label) {
         Some(content) => {
-            state
-                .pending_recalls
-                .insert(sender.to_string(), content);
+            state.pending_recalls.insert(sender.to_string(), content);
             format!("Recalled pin '{label}'. It will be included in your next message.")
         }
         None => format!("No pin named '{label}'. Use /pins to see available pins."),
@@ -446,15 +438,17 @@ fn cmd_cron(sender: &str, arg: &str) -> String {
         return "Usage: /cron \"0 9 * * MON\" <message>\n       /cron 0 9 * * MON <message>\nAll times are UTC.".to_string();
     }
     // Parse quoted or unquoted cron pattern
-    let (pattern, message) = if arg.starts_with('"') {
+    let (pattern, message) = if let Some(after_open) = arg.strip_prefix('"') {
         // Quoted: /cron "0 9 * * MON" message
-        match arg[1..].find('"') {
+        match after_open.find('"') {
             Some(end) => {
-                let p = &arg[1..1 + end];
-                let msg = arg[1 + end + 1..].trim();
+                let p = &after_open[..end];
+                let msg = after_open[end + 1..].trim();
                 (p.to_string(), msg.to_string())
             }
-            None => return "Missing closing quote. Usage: /cron \"0 9 * * *\" <message>".to_string(),
+            None => {
+                return "Missing closing quote. Usage: /cron \"0 9 * * *\" <message>".to_string()
+            }
         }
     } else {
         // Unquoted: assume exactly 5 fields then message
@@ -506,7 +500,12 @@ fn cmd_daily(sender: &str, arg: &str) -> String {
     }
     let pattern = match crate::helpers::parse_daily_time(parts[0]) {
         Some(p) => p,
-        None => return format!("Invalid time: '{}'. Use HH:MM format (e.g., 09:00).", parts[0]),
+        None => {
+            return format!(
+                "Invalid time: '{}'. Use HH:MM format (e.g., 09:00).",
+                parts[0]
+            )
+        }
     };
     let message = parts[1];
     let Ok(conn) = crate::schedule::open_schedule_db() else {
@@ -517,7 +516,10 @@ fn cmd_daily(sender: &str, arg: &str) -> String {
         return "Failed to create daily job.".to_string();
     }
     crate::audit::log_action("cron_create", sender, &format!("#{id} daily {}", parts[0]));
-    format!("Daily job #{id} created: every day at {} UTC\nMessage: {message}", parts[0])
+    format!(
+        "Daily job #{id} created: every day at {} UTC\nMessage: {message}",
+        parts[0]
+    )
 }
 
 fn cmd_crons(sender: &str) -> String {
@@ -531,9 +533,14 @@ fn cmd_crons(sender: &str) -> String {
     let mut lines = vec![format!("Active cron jobs ({}):", jobs.len())];
     for (id, message, job_type, pattern, interval, _next_at) in &jobs {
         let schedule = if *job_type == "cron" {
-            pattern.as_deref().map(crate::helpers::format_cron_human).unwrap_or_default()
+            pattern
+                .as_deref()
+                .map(crate::helpers::format_cron_human)
+                .unwrap_or_default()
         } else {
-            interval.map(|s| format!("every {}", crate::helpers::format_duration_human(s as u64))).unwrap_or_default()
+            interval
+                .map(|s| format!("every {}", crate::helpers::format_duration_human(s as u64)))
+                .unwrap_or_default()
         };
         lines.push(format!("  #{id} [{job_type}] {schedule} — {message}"));
     }
@@ -731,9 +738,7 @@ async fn handle_more(state: &State, sender: &str) -> Result<(), AppError> {
     if let Some((_, session_id)) = state.session_mgr.truncated_sessions.remove(sender) {
         return handle_continuation(state, sender, &session_id).await;
     }
-    state
-        .send_message(sender, "Nothing to continue.")
-        .await?;
+    state.send_message(sender, "Nothing to continue.").await?;
     Ok(())
 }
 
@@ -827,7 +832,15 @@ pub(crate) async fn handle_message(
     let call_start = Instant::now();
     let result = state
         .claude_runner
-        .run_claude(&prompt, &session_id, &model, attachments, sender, state.config.max_budget, &system_prompt)
+        .run_claude(
+            &prompt,
+            &session_id,
+            &model,
+            attachments,
+            sender,
+            state.config.max_budget,
+            &system_prompt,
+        )
         .await;
     state.record_latency(call_start.elapsed().as_millis() as u64);
 
@@ -892,9 +905,8 @@ async fn send_claude_response(
                     .session_mgr
                     .truncated_sessions
                     .insert(sender.to_string(), session_id.to_string());
-                let msg = format!(
-                    "{response}\n\n(Response may be truncated. Send /more to continue.)"
-                );
+                let msg =
+                    format!("{response}\n\n(Response may be truncated. Send /more to continue.)");
                 state.send_long_message(sender, &msg).await?;
             } else {
                 state.session_mgr.truncated_sessions.remove(sender);
@@ -907,18 +919,29 @@ async fn send_claude_response(
                     Ok(data) => {
                         let ct = crate::helpers::content_type_from_extension(file_path);
                         let fname = file_path.file_name().unwrap_or_default().to_string_lossy();
-                        if let Err(e) = state.signal_api.send_attachment(sender, &data, ct, &fname).await {
+                        if let Err(e) = state
+                            .signal_api
+                            .send_attachment(sender, &data, ct, &fname)
+                            .await
+                        {
                             warn!(sender = %sender, file = %file_path.display(), "Attachment send failed: {e}");
                         }
                     }
-                    Err(e) => warn!(sender = %sender, file = %file_path.display(), "Failed to read file: {e}"),
+                    Err(e) => {
+                        warn!(sender = %sender, file = %file_path.display(), "Failed to read file: {e}")
+                    }
                 }
             }
             Ok(())
         }
         Err(e) => {
             state.metrics.error_count.fetch_add(1, Ordering::Relaxed);
-            crate::webhook::fire_if_configured(&state.config.webhook_url, "error", sender, &e.to_string());
+            crate::webhook::fire_if_configured(
+                &state.config.webhook_url,
+                "error",
+                sender,
+                &e.to_string(),
+            );
             // Enqueue for background retry
             if !original_prompt.is_empty() {
                 if let Ok(qconn) = crate::queue::open_queue_db() {
@@ -971,7 +994,14 @@ pub(crate) async fn handle_continuation(
 
     let _ = state.set_typing(sender, false).await;
 
-    send_claude_response(state, sender, result, session_id, "continue from where you left off").await
+    send_claude_response(
+        state,
+        sender,
+        result,
+        session_id,
+        "continue from where you left off",
+    )
+    .await
 }
 
 /// Retry pending messages from the queue. Called periodically by the background loop.
@@ -997,8 +1027,8 @@ pub(crate) async fn retry_pending_messages(state: &State) {
             .await
         {
             Ok(result) => {
-                if let Err(e) = send_claude_response(state, &sender, Ok(result), &session_id, "")
-                    .await
+                if let Err(e) =
+                    send_claude_response(state, &sender, Ok(result), &session_id, "").await
                 {
                     warn!("Retry send failed for {sender}: {e}");
                     crate::queue::increment_retry(&qconn, id);
@@ -1033,7 +1063,9 @@ pub(crate) async fn deliver_due_cron_jobs(state: &State) {
     let Ok(conn) = crate::schedule::open_schedule_db() else {
         return;
     };
-    for (id, sender, message, cron_pattern, interval_secs) in crate::schedule::get_due_cron_jobs(&conn) {
+    for (id, sender, message, cron_pattern, interval_secs) in
+        crate::schedule::get_due_cron_jobs(&conn)
+    {
         let text = format!("Scheduled: {message}");
         if let Err(e) = state.send_message(&sender, &text).await {
             warn!(sender = %sender, "Failed to deliver cron job: {e}");
@@ -1089,9 +1121,9 @@ mod tests {
     #[tokio::test]
     async fn test_download_attachments_image_success() {
         let mut signal = MockSignalApi::new();
-        signal.expect_download_attachment().returning(|att| {
-            Ok(PathBuf::from(format!("/tmp/ccchat/test_{}.png", att.id)))
-        });
+        signal
+            .expect_download_attachment()
+            .returning(|att| Ok(PathBuf::from(format!("/tmp/ccchat/test_{}.png", att.id))));
         let state = test_state_with(signal, MockClaudeRunner::new());
         let atts = vec![AttachmentInfo {
             id: "img1".to_string(),
@@ -1107,9 +1139,9 @@ mod tests {
     #[tokio::test]
     async fn test_download_attachments_audio_sets_flag() {
         let mut signal = MockSignalApi::new();
-        signal.expect_download_attachment().returning(|att| {
-            Ok(PathBuf::from(format!("/tmp/ccchat/test_{}.aac", att.id)))
-        });
+        signal
+            .expect_download_attachment()
+            .returning(|att| Ok(PathBuf::from(format!("/tmp/ccchat/test_{}.aac", att.id))));
         let state = test_state_with(signal, MockClaudeRunner::new());
         let atts = vec![AttachmentInfo {
             id: "aud1".to_string(),
@@ -1479,7 +1511,10 @@ mod tests {
         let result = handle_message(&state, "+allowed_user", "explain this", &[]).await;
         assert!(result.is_ok());
         // Should have stored the session for /more
-        assert!(state.session_mgr.truncated_sessions.contains_key("+allowed_user"));
+        assert!(state
+            .session_mgr
+            .truncated_sessions
+            .contains_key("+allowed_user"));
     }
 
     #[tokio::test]
@@ -1579,7 +1614,10 @@ mod tests {
         let state = test_state_with(signal, claude);
         let result = handle_continuation(&state, "+allowed_user", "sess-1").await;
         assert!(result.is_ok());
-        assert!(state.session_mgr.truncated_sessions.contains_key("+allowed_user"));
+        assert!(state
+            .session_mgr
+            .truncated_sessions
+            .contains_key("+allowed_user"));
     }
 
     #[tokio::test]
@@ -1672,10 +1710,7 @@ mod tests {
             );
         }
         // Insert a message with content longer than 100 chars
-        let long_content = format!(
-            "databases {} end of long message",
-            "x".repeat(120)
-        );
+        let long_content = format!("databases {} end of long message", "x".repeat(120));
         store_message(&conn, "assistant", &long_content, "sess1");
         drop(conn);
 
@@ -1707,7 +1742,9 @@ mod tests {
         );
         let _ = handle_command(&state, "+1234567890", "/allow 99");
         let actions = crate::audit::get_recent_actions(10);
-        let found = actions.iter().any(|(a, t, d, _)| a == "allow" && *t == uid && d == "AuditTest");
+        let found = actions
+            .iter()
+            .any(|(a, t, d, _)| a == "allow" && *t == uid && d == "AuditTest");
         assert!(found, "Expected audit entry for allow, got: {actions:?}");
     }
 
@@ -1759,7 +1796,9 @@ mod tests {
                     && files[0] == PathBuf::from("/tmp/photo.png")
                     && files[1] == PathBuf::from("/tmp/doc.pdf")
             })
-            .returning(|_, _, _, _, _, _, _| Ok(("I see a photo and a PDF.".to_string(), Some(0.02))));
+            .returning(|_, _, _, _, _, _, _| {
+                Ok(("I see a photo and a PDF.".to_string(), Some(0.02)))
+            });
 
         let state = test_state_with(signal, claude);
         let attachments = vec![
@@ -1809,8 +1848,18 @@ mod tests {
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         let text = handle_command(&state, "+allowed_user", "/help").unwrap();
         let commands = [
-            "/help", "/status", "/reset", "/more", "/model", "/memory",
-            "/forget", "/search", "/pending", "/allow", "/revoke", "/export-config",
+            "/help",
+            "/status",
+            "/reset",
+            "/more",
+            "/model",
+            "/memory",
+            "/forget",
+            "/search",
+            "/pending",
+            "/allow",
+            "/revoke",
+            "/export-config",
         ];
         for cmd in &commands {
             assert!(text.contains(cmd), "Missing command: {cmd}");
@@ -1823,7 +1872,10 @@ mod tests {
         let text = handle_command(&state, "+allowed_user", "/help").unwrap();
         // Each line after the header should have " - " separator
         for line in text.lines().skip(1) {
-            assert!(line.contains(" - "), "Missing description separator in: {line}");
+            assert!(
+                line.contains(" - "),
+                "Missing description separator in: {line}"
+            );
         }
     }
 
@@ -1874,8 +1926,13 @@ mod tests {
         // Verify it was enqueued
         let conn = crate::queue::open_queue_db().unwrap();
         let pending = crate::queue::get_pending(&conn);
-        let found = pending.iter().any(|(_, s, c, _)| s == "+allowed_user" && c.contains("enqueue me"));
-        assert!(found, "Expected prompt to be enqueued, pending: {pending:?}");
+        let found = pending
+            .iter()
+            .any(|(_, s, c, _)| s == "+allowed_user" && c.contains("enqueue me"));
+        assert!(
+            found,
+            "Expected prompt to be enqueued, pending: {pending:?}"
+        );
         // Cleanup
         for (id, _, _, _) in &pending {
             crate::queue::mark_completed(&conn, *id);
@@ -1904,7 +1961,10 @@ mod tests {
 
         // Verify completed (purged)
         let pending = crate::queue::get_pending(&conn);
-        assert!(!pending.iter().any(|(pid, _, _, _)| *pid == id), "should be completed");
+        assert!(
+            !pending.iter().any(|(pid, _, _, _)| *pid == id),
+            "should be completed"
+        );
     }
 
     #[tokio::test]
@@ -1971,7 +2031,11 @@ mod tests {
         );
 
         // Cleanup
-        conn.execute("DELETE FROM message_queue WHERE id = ?1", rusqlite::params![id]).unwrap();
+        conn.execute(
+            "DELETE FROM message_queue WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1984,7 +2048,12 @@ mod tests {
         // Also store a message matching "nginx" so FTS5 search finds it
         let conn = open_memory_db(&sender).unwrap();
         store_message(&conn, "user", "How do I deploy nginx?", "old-sess");
-        store_message(&conn, "assistant", "Use apt install nginx then edit the config.", "old-sess");
+        store_message(
+            &conn,
+            "assistant",
+            "Use apt install nginx then edit the config.",
+            "old-sess",
+        );
         drop(conn);
 
         let mut signal = MockSignalApi::new();
@@ -2061,7 +2130,10 @@ mod tests {
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         let result = handle_command(&state, &sender, "/usage").unwrap();
         assert!(result.contains("First message:"), "got: {result}");
-        assert!(!result.contains("N/A"), "expected a real date, got: {result}");
+        assert!(
+            !result.contains("N/A"),
+            "expected a real date, got: {result}"
+        );
         delete_memory(&sender);
     }
 
@@ -2090,7 +2162,10 @@ mod tests {
         let conn = open_memory_db(&sender).unwrap();
         crate::memory::messages::save_pin(&conn, "label", "first");
         crate::memory::messages::save_pin(&conn, "label", "second");
-        assert_eq!(crate::memory::messages::get_pin(&conn, "label"), Some("second".to_string()));
+        assert_eq!(
+            crate::memory::messages::get_pin(&conn, "label"),
+            Some("second".to_string())
+        );
         delete_memory(&sender);
     }
 
@@ -2194,7 +2269,10 @@ mod tests {
         drop(conn);
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         let _ = handle_command(&state, &sender, "/recall context");
-        assert!(state.pending_recalls.contains_key(&sender), "should set pending recall");
+        assert!(
+            state.pending_recalls.contains_key(&sender),
+            "should set pending recall"
+        );
         delete_memory(&sender);
     }
 
@@ -2218,22 +2296,27 @@ mod tests {
         signal.expect_set_typing().returning(|_, _| Ok(()));
         signal.expect_send_msg().returning(|_, _| Ok(()));
         let mut claude = MockClaudeRunner::new();
-        claude.expect_run_claude()
+        claude
+            .expect_run_claude()
             .returning(|_, _, _, _, _, _, _| Ok(("ok".to_string(), None)));
-        claude.expect_summarize_session()
+        claude
+            .expect_summarize_session()
             .times(1)
             .returning(|_, _| Some("Summary".to_string()));
         let state = test_state_with(signal, claude);
         let sender = format!("+autosum_{}", uuid::Uuid::new_v4());
         state.allowed_ids.insert(sender.clone(), ());
         // Pre-populate session with message_count at threshold - 1
-        state.session_mgr.sessions.insert(sender.clone(), SenderState {
-            session_id: "sess".to_string(),
-            model: "sonnet".to_string(),
-            lock: Arc::new(Mutex::new(())),
-            last_activity: Instant::now(),
-            message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
-        });
+        state.session_mgr.sessions.insert(
+            sender.clone(),
+            SenderState {
+                session_id: "sess".to_string(),
+                model: "sonnet".to_string(),
+                lock: Arc::new(Mutex::new(())),
+                last_activity: Instant::now(),
+                message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
+            },
+        );
         let _ = handle_message(&state, &sender, "trigger", &[]).await;
         // summarize_session was called (verified by times(1))
         delete_memory(&sender);
@@ -2245,7 +2328,8 @@ mod tests {
         signal.expect_set_typing().returning(|_, _| Ok(()));
         signal.expect_send_msg().returning(|_, _| Ok(()));
         let mut claude = MockClaudeRunner::new();
-        claude.expect_run_claude()
+        claude
+            .expect_run_claude()
             .returning(|_, _, _, _, _, _, _| Ok(("ok".to_string(), None)));
         claude.expect_summarize_session().never();
         let state = test_state_with(signal, claude);
@@ -2259,22 +2343,32 @@ mod tests {
         signal.expect_set_typing().returning(|_, _| Ok(()));
         signal.expect_send_msg().returning(|_, _| Ok(()));
         let mut claude = MockClaudeRunner::new();
-        claude.expect_run_claude()
+        claude
+            .expect_run_claude()
             .returning(|_, _, _, _, _, _, _| Ok(("ok".to_string(), None)));
-        claude.expect_summarize_session()
+        claude
+            .expect_summarize_session()
             .returning(|_, _| Some("Summary".to_string()));
         let state = test_state_with(signal, claude);
         let sender = format!("+autosum_reset_{}", uuid::Uuid::new_v4());
         state.allowed_ids.insert(sender.clone(), ());
-        state.session_mgr.sessions.insert(sender.clone(), SenderState {
-            session_id: "sess".to_string(),
-            model: "sonnet".to_string(),
-            lock: Arc::new(Mutex::new(())),
-            last_activity: Instant::now(),
-            message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
-        });
+        state.session_mgr.sessions.insert(
+            sender.clone(),
+            SenderState {
+                session_id: "sess".to_string(),
+                model: "sonnet".to_string(),
+                lock: Arc::new(Mutex::new(())),
+                last_activity: Instant::now(),
+                message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
+            },
+        );
         let _ = handle_message(&state, &sender, "trigger", &[]).await;
-        let count = state.session_mgr.sessions.get(&sender).unwrap().message_count;
+        let count = state
+            .session_mgr
+            .sessions
+            .get(&sender)
+            .unwrap()
+            .message_count;
         assert_eq!(count, 0, "counter should reset after summarize");
         delete_memory(&sender);
     }
@@ -2285,12 +2379,18 @@ mod tests {
         signal.expect_set_typing().returning(|_, _| Ok(()));
         signal.expect_send_msg().returning(|_, _| Ok(()));
         let mut claude = MockClaudeRunner::new();
-        claude.expect_run_claude()
+        claude
+            .expect_run_claude()
             .returning(|_, _, _, _, _, _, _| Ok(("ok".to_string(), None)));
         claude.expect_summarize_session().never();
         let state = test_state_with(signal, claude);
         let _ = handle_message(&state, "+allowed_user", "msg1", &[]).await;
-        let count = state.session_mgr.sessions.get("+allowed_user").unwrap().message_count;
+        let count = state
+            .session_mgr
+            .sessions
+            .get("+allowed_user")
+            .unwrap()
+            .message_count;
         assert_eq!(count, 1, "counter should be 1 after one message");
     }
 
@@ -2298,7 +2398,12 @@ mod tests {
     fn test_sender_state_message_count_initializes_zero() {
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         let (_, _, _, _) = state.get_or_create_session("+fresh");
-        let count = state.session_mgr.sessions.get("+fresh").unwrap().message_count;
+        let count = state
+            .session_mgr
+            .sessions
+            .get("+fresh")
+            .unwrap()
+            .message_count;
         assert_eq!(count, 0);
     }
 
@@ -2308,20 +2413,23 @@ mod tests {
         signal.expect_set_typing().returning(|_, _| Ok(()));
         signal.expect_send_msg().returning(|_, _| Ok(()));
         let mut claude = MockClaudeRunner::new();
-        claude.expect_run_claude()
+        claude
+            .expect_run_claude()
             .returning(|_, _, _, _, _, _, _| Ok(("ok".to_string(), None)));
-        claude.expect_summarize_session()
-            .returning(|_, _| None); // summarize fails
+        claude.expect_summarize_session().returning(|_, _| None); // summarize fails
         let state = test_state_with(signal, claude);
         let sender = format!("+autosum_fail_{}", uuid::Uuid::new_v4());
         state.allowed_ids.insert(sender.clone(), ());
-        state.session_mgr.sessions.insert(sender.clone(), SenderState {
-            session_id: "sess".to_string(),
-            model: "sonnet".to_string(),
-            lock: Arc::new(Mutex::new(())),
-            last_activity: Instant::now(),
-            message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
-        });
+        state.session_mgr.sessions.insert(
+            sender.clone(),
+            SenderState {
+                session_id: "sess".to_string(),
+                model: "sonnet".to_string(),
+                lock: Arc::new(Mutex::new(())),
+                last_activity: Instant::now(),
+                message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
+            },
+        );
         // Should not panic even when summarize returns None
         let result = handle_message(&state, &sender, "trigger", &[]).await;
         assert!(result.is_ok());
@@ -2334,24 +2442,32 @@ mod tests {
         signal.expect_set_typing().returning(|_, _| Ok(()));
         signal.expect_send_msg().returning(|_, _| Ok(()));
         let mut claude = MockClaudeRunner::new();
-        claude.expect_run_claude()
+        claude
+            .expect_run_claude()
             .returning(|_, _, _, _, _, _, _| Ok(("ok".to_string(), None)));
-        claude.expect_summarize_session()
+        claude
+            .expect_summarize_session()
             .returning(|_, _| Some("Auto-summary content".to_string()));
         let state = test_state_with(signal, claude);
         let sender = format!("+autosum_save_{}", uuid::Uuid::new_v4());
         state.allowed_ids.insert(sender.clone(), ());
-        state.session_mgr.sessions.insert(sender.clone(), SenderState {
-            session_id: "sess".to_string(),
-            model: "sonnet".to_string(),
-            lock: Arc::new(Mutex::new(())),
-            last_activity: Instant::now(),
-            message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
-        });
+        state.session_mgr.sessions.insert(
+            sender.clone(),
+            SenderState {
+                session_id: "sess".to_string(),
+                model: "sonnet".to_string(),
+                lock: Arc::new(Mutex::new(())),
+                last_activity: Instant::now(),
+                message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
+            },
+        );
         let _ = handle_message(&state, &sender, "trigger", &[]).await;
         // Verify memory was saved
         let status = crate::memory::memory_status(&sender);
-        assert!(status.contains("Auto-summary"), "expected summary in memory, got: {status}");
+        assert!(
+            status.contains("Auto-summary"),
+            "expected summary in memory, got: {status}"
+        );
         delete_memory(&sender);
     }
 
@@ -2361,23 +2477,37 @@ mod tests {
         signal.expect_set_typing().returning(|_, _| Ok(()));
         signal.expect_send_msg().returning(|_, _| Ok(()));
         let mut claude = MockClaudeRunner::new();
-        claude.expect_run_claude()
+        claude
+            .expect_run_claude()
             .returning(|_, _, _, _, _, _, _| Ok(("ok".to_string(), None)));
-        claude.expect_summarize_session()
+        claude
+            .expect_summarize_session()
             .returning(|_, _| Some("Summary".to_string()));
         let state = test_state_with(signal, claude);
         let sender = format!("+autosum_nores_{}", uuid::Uuid::new_v4());
         state.allowed_ids.insert(sender.clone(), ());
-        state.session_mgr.sessions.insert(sender.clone(), SenderState {
-            session_id: "original-session".to_string(),
-            model: "sonnet".to_string(),
-            lock: Arc::new(Mutex::new(())),
-            last_activity: Instant::now(),
-            message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
-        });
+        state.session_mgr.sessions.insert(
+            sender.clone(),
+            SenderState {
+                session_id: "original-session".to_string(),
+                model: "sonnet".to_string(),
+                lock: Arc::new(Mutex::new(())),
+                last_activity: Instant::now(),
+                message_count: crate::constants::AUTO_SUMMARIZE_THRESHOLD - 1,
+            },
+        );
         let _ = handle_message(&state, &sender, "trigger", &[]).await;
-        let session_id = state.session_mgr.sessions.get(&sender).unwrap().session_id.clone();
-        assert_eq!(session_id, "original-session", "session_id should not change");
+        let session_id = state
+            .session_mgr
+            .sessions
+            .get(&sender)
+            .unwrap()
+            .session_id
+            .clone();
+        assert_eq!(
+            session_id, "original-session",
+            "session_id should not change"
+        );
         delete_memory(&sender);
     }
 
@@ -2387,15 +2517,27 @@ mod tests {
     fn test_cmd_remind_success() {
         let sender = "+remind_ok";
         let result = cmd_remind(sender, "5m Check the oven");
-        assert!(result.contains("Reminder #"), "should confirm reminder: {result}");
-        assert!(result.contains("5 minutes"), "should show human time: {result}");
-        assert!(result.contains("Check the oven"), "should echo message: {result}");
+        assert!(
+            result.contains("Reminder #"),
+            "should confirm reminder: {result}"
+        );
+        assert!(
+            result.contains("5 minutes"),
+            "should show human time: {result}"
+        );
+        assert!(
+            result.contains("Check the oven"),
+            "should echo message: {result}"
+        );
     }
 
     #[test]
     fn test_cmd_remind_invalid_time() {
         let result = cmd_remind("+user", "xyz Do something");
-        assert!(result.contains("Invalid time format"), "should reject bad time: {result}");
+        assert!(
+            result.contains("Invalid time format"),
+            "should reject bad time: {result}"
+        );
     }
 
     #[test]
@@ -2423,14 +2565,20 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .expect("should parse reminder id");
         let result = cmd_cancel_reminder(sender, &id.to_string());
-        assert!(result.contains("cancelled"), "should confirm cancel: {result}");
+        assert!(
+            result.contains("cancelled"),
+            "should confirm cancel: {result}"
+        );
     }
 
     #[test]
     fn test_cmd_cancel_reminder_not_found() {
         let sender = format!("+cancel_nf_{}", uuid::Uuid::new_v4());
         let result = cmd_cancel_reminder(&sender, "99999");
-        assert!(result.contains("No pending reminder"), "should say not found: {result}");
+        assert!(
+            result.contains("No pending reminder"),
+            "should say not found: {result}"
+        );
     }
 
     #[test]
@@ -2461,20 +2609,29 @@ mod tests {
         let sender = format!("+cron_ok_{}", std::process::id());
         let result = cmd_cron(&sender, "\"0 9 * * *\" Daily standup");
         assert!(result.contains("Cron job #"), "should confirm: {result}");
-        assert!(result.contains("Daily standup"), "should echo message: {result}");
+        assert!(
+            result.contains("Daily standup"),
+            "should echo message: {result}"
+        );
     }
 
     #[test]
     fn test_cmd_cron_unquoted() {
         let sender = format!("+cron_unq_{}", std::process::id());
         let result = cmd_cron(&sender, "0 9 * * MON Monday check");
-        assert!(result.contains("Cron job #"), "should accept unquoted: {result}");
+        assert!(
+            result.contains("Cron job #"),
+            "should accept unquoted: {result}"
+        );
     }
 
     #[test]
     fn test_cmd_cron_invalid() {
         let result = cmd_cron("+user", "\"not valid\" msg");
-        assert!(result.contains("Invalid cron pattern"), "should reject bad pattern: {result}");
+        assert!(
+            result.contains("Invalid cron pattern"),
+            "should reject bad pattern: {result}"
+        );
     }
 
     #[test]
@@ -2487,14 +2644,23 @@ mod tests {
     fn test_cmd_every_hourly() {
         let sender = format!("+every_ok_{}", std::process::id());
         let result = cmd_every(&sender, "1h Check status");
-        assert!(result.contains("Interval job #"), "should confirm: {result}");
-        assert!(result.contains("1 hours"), "should show human time: {result}");
+        assert!(
+            result.contains("Interval job #"),
+            "should confirm: {result}"
+        );
+        assert!(
+            result.contains("1 hours"),
+            "should show human time: {result}"
+        );
     }
 
     #[test]
     fn test_cmd_every_invalid() {
         let result = cmd_every("+user", "xyz Do something");
-        assert!(result.contains("Invalid interval"), "should reject bad interval: {result}");
+        assert!(
+            result.contains("Invalid interval"),
+            "should reject bad interval: {result}"
+        );
     }
 
     #[test]
@@ -2514,7 +2680,10 @@ mod tests {
     #[test]
     fn test_cmd_daily_invalid_time() {
         let result = cmd_daily("+user", "25:99 Bad time");
-        assert!(result.contains("Invalid time"), "should reject bad time: {result}");
+        assert!(
+            result.contains("Invalid time"),
+            "should reject bad time: {result}"
+        );
     }
 
     #[test]
@@ -2535,7 +2704,10 @@ mod tests {
         let sender = format!("+crons_list_{}", std::process::id());
         cmd_every(&sender, "1h Check");
         let result = cmd_crons(&sender);
-        assert!(result.contains("Active cron jobs"), "should list jobs: {result}");
+        assert!(
+            result.contains("Active cron jobs"),
+            "should list jobs: {result}"
+        );
         assert!(result.contains("Check"), "should show message: {result}");
     }
 
@@ -2543,33 +2715,49 @@ mod tests {
     fn test_cmd_cron_cancel_success() {
         let sender = format!("+cc_ok_{}", std::process::id());
         let create = cmd_every(&sender, "1h Cancel me");
-        let id: i64 = create.split('#').nth(1)
+        let id: i64 = create
+            .split('#')
+            .nth(1)
             .and_then(|s| s.split_whitespace().next())
             .and_then(|s| s.parse().ok())
             .expect("should parse id");
         let result = cmd_cron_cancel(&sender, &id.to_string());
-        assert!(result.contains("cancelled"), "should confirm cancel: {result}");
+        assert!(
+            result.contains("cancelled"),
+            "should confirm cancel: {result}"
+        );
     }
 
     #[test]
     fn test_cmd_cron_cancel_not_found() {
         let sender = format!("+cc_nf_{}", uuid::Uuid::new_v4());
         let result = cmd_cron_cancel(&sender, "99999");
-        assert!(result.contains("No cron job"), "should say not found: {result}");
+        assert!(
+            result.contains("No cron job"),
+            "should say not found: {result}"
+        );
     }
 
     #[test]
     fn test_cmd_cron_pause_and_resume() {
         let sender = format!("+cp_ok_{}", std::process::id());
         let create = cmd_every(&sender, "1h Pause me");
-        let id: i64 = create.split('#').nth(1)
+        let id: i64 = create
+            .split('#')
+            .nth(1)
             .and_then(|s| s.split_whitespace().next())
             .and_then(|s| s.parse().ok())
             .expect("should parse id");
         let pause_result = cmd_cron_pause(&sender, &id.to_string());
-        assert!(pause_result.contains("paused"), "should confirm pause: {pause_result}");
+        assert!(
+            pause_result.contains("paused"),
+            "should confirm pause: {pause_result}"
+        );
         let resume_result = cmd_cron_resume(&sender, &id.to_string());
-        assert!(resume_result.contains("resumed"), "should confirm resume: {resume_result}");
+        assert!(
+            resume_result.contains("resumed"),
+            "should confirm resume: {resume_result}"
+        );
     }
 
     // --- handle_command wiring tests ---
@@ -2627,10 +2815,22 @@ mod tests {
     fn test_handle_command_help_includes_cron() {
         let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
         let result = handle_command(&state, "+user", "/help").unwrap();
-        assert!(result.contains("/cron"), "help should mention /cron: {result}");
-        assert!(result.contains("/every"), "help should mention /every: {result}");
-        assert!(result.contains("/daily"), "help should mention /daily: {result}");
-        assert!(result.contains("/crons"), "help should mention /crons: {result}");
+        assert!(
+            result.contains("/cron"),
+            "help should mention /cron: {result}"
+        );
+        assert!(
+            result.contains("/every"),
+            "help should mention /every: {result}"
+        );
+        assert!(
+            result.contains("/daily"),
+            "help should mention /daily: {result}"
+        );
+        assert!(
+            result.contains("/crons"),
+            "help should mention /crons: {result}"
+        );
     }
 
     // --- deliver_due_cron_jobs tests ---
@@ -2670,17 +2870,22 @@ mod tests {
         ).unwrap();
         let id = conn.last_insert_rowid();
         deliver_due_cron_jobs(&state).await;
-        let next: i64 = conn.query_row(
-            "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
-            rusqlite::params![id], |row| row.get(0),
-        ).unwrap();
+        let next: i64 = conn
+            .query_row(
+                "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(next > now, "next_delivery_at should advance after delivery");
     }
 
     #[tokio::test]
     async fn test_deliver_due_cron_jobs_skips_on_send_failure() {
         let mut signal = MockSignalApi::new();
-        signal.expect_send_msg().returning(|_, _| Err("send failed".into()));
+        signal
+            .expect_send_msg()
+            .returning(|_, _| Err("send failed".into()));
         let state = test_state_with(signal, MockClaudeRunner::new());
         let conn = crate::schedule::open_schedule_db().unwrap();
         let now = crate::helpers::epoch_now();
@@ -2690,10 +2895,13 @@ mod tests {
         ).unwrap();
         let id = conn.last_insert_rowid();
         deliver_due_cron_jobs(&state).await;
-        let next: i64 = conn.query_row(
-            "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
-            rusqlite::params![id], |row| row.get(0),
-        ).unwrap();
+        let next: i64 = conn
+            .query_row(
+                "SELECT next_delivery_at FROM cron_jobs WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(next <= now, "should NOT advance on send failure");
     }
 }

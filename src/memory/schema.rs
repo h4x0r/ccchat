@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::info;
 
+use super::config::config_dir;
 use crate::error::AppError;
 use crate::helpers::hash_message;
-use super::config::config_dir;
 
 pub(crate) fn memory_dir() -> PathBuf {
     let dir = config_dir().join("memories");

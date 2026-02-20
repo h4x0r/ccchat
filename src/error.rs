@@ -6,8 +6,6 @@ pub(crate) enum AppError {
     Signal(String),
     #[error("Claude error: {0}")]
     Claude(String),
-    #[error("Attachment error: {0}")]
-    Attachment(String),
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("IO error: {0}")]
