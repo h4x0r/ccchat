@@ -1,0 +1,13 @@
+#!/bin/sh
+# ccchat pre-commit hook — runs fast checks before every commit.
+# Install once: git config core.hooksPath .githooks
+
+set -e
+
+echo "→ cargo fmt --check"
+cargo fmt --check
+
+echo "→ cargo clippy"
+cargo clippy --all-targets -- -D warnings
+
+echo "✓ pre-commit checks passed"
