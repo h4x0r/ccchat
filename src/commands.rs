@@ -86,6 +86,7 @@ fn cmd_allow(state: &State, arg: &str) -> String {
     };
     state.allowed_ids.insert(real_id.clone(), ());
     persist_allow(&real_id, &name);
+    crate::audit::log_action("allow", &real_id, &name);
     info!(sender = %real_id, sender_name = %name, "Sender approved");
     let display = if name.is_empty() {
         real_id.clone()
@@ -101,6 +102,7 @@ fn cmd_revoke(state: &State, id: &str) -> String {
     }
     state.allowed_ids.remove(id);
     persist_revoke(id);
+    crate::audit::log_action("revoke", id, "");
     state.session_mgr.sessions.remove(id);
     info!(sender = %id, "Sender revoked");
     format!("Revoked: {id}")
@@ -284,6 +286,29 @@ pub(crate) fn buffer_debounced(state: &Arc<State>, reply_to: &str, message_text:
     }
 }
 
+fn cmd_audit() -> String {
+    let actions = crate::audit::get_recent_actions(20);
+    if actions.is_empty() {
+        return "No audit log entries.".to_string();
+    }
+    let mut lines = vec![format!("Audit log ({} entries):", actions.len())];
+    for (action, target, detail, ts) in &actions {
+        let date = format_epoch(*ts as u64);
+        let target_str = if target.is_empty() {
+            String::new()
+        } else {
+            format!(" {target}")
+        };
+        let detail_str = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" ({detail})")
+        };
+        lines.push(format!("[{date}] {action}{target_str}{detail_str}"));
+    }
+    lines.join("\n")
+}
+
 fn cmd_export(sender: &str) -> String {
     let Ok(conn) = crate::memory::open_memory_db(sender) else {
         return "No messages to export.".to_string();
@@ -302,6 +327,7 @@ fn cmd_help() -> String {
      /forget - Clear all stored memory\n\
      /search <query> - Search conversation history\n\
      /export - Export conversation history\n\
+     /audit - View recent admin actions\n\
      /pending - List blocked senders awaiting approval\n\
      /allow <id> - Approve a pending sender\n\
      /revoke <id> - Remove a sender's access\n\
@@ -348,6 +374,9 @@ pub(crate) fn handle_command(state: &State, sender: &str, text: &str) -> Option<
     }
     if text == "/export" {
         return Some(cmd_export(sender));
+    }
+    if text == "/audit" {
+        return Some(cmd_audit());
     }
     None
 }
@@ -1244,6 +1273,34 @@ mod tests {
         let has_truncated = result_lines.iter().any(|l| l.contains("..."));
         assert!(has_truncated, "Expected at least one truncated preview");
         delete_memory(&sender);
+    }
+
+    #[test]
+    fn test_allow_command_creates_audit_entry() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        let uid = uuid::Uuid::new_v4().to_string();
+        state.pending_senders.insert(
+            uid.clone(),
+            PendingSender {
+                name: "AuditTest".to_string(),
+                short_id: 99,
+            },
+        );
+        let _ = handle_command(&state, "+1234567890", "/allow 99");
+        let actions = crate::audit::get_recent_actions(10);
+        let found = actions.iter().any(|(a, t, d, _)| a == "allow" && *t == uid && d == "AuditTest");
+        assert!(found, "Expected audit entry for allow, got: {actions:?}");
+    }
+
+    #[test]
+    fn test_handle_command_audit() {
+        // Log a test action first
+        crate::audit::log_action("test_audit_cmd", "target", "detail");
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        let result = handle_command(&state, "+1234567890", "/audit");
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("Audit log"), "got: {text}");
     }
 
     #[test]

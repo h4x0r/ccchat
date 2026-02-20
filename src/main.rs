@@ -1,3 +1,4 @@
+mod audit;
 mod commands;
 mod constants;
 mod error;
@@ -410,6 +411,7 @@ async fn main() {
                     &reload_state.runtime_system_prompt,
                     &reload_state.sender_prompts,
                 );
+                audit::log_action("config_reload", "", &format!("+{added} -{removed}"));
                 info!("Config reloaded: +{added} -{removed} senders");
             }
         });
@@ -422,6 +424,7 @@ async fn main() {
             tokio::signal::ctrl_c()
                 .await
                 .expect("Failed to listen for ctrl-c");
+            audit::log_action("shutdown", "", "graceful");
             info!("Shutdown signal received, saving active sessions...");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
@@ -443,6 +446,7 @@ async fn main() {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                     .expect("Failed to register SIGTERM handler");
             sig.recv().await;
+            audit::log_action("shutdown", "", "SIGTERM");
             info!("SIGTERM received, saving active sessions...");
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
