@@ -90,6 +90,18 @@ pub(crate) fn parse_duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(secs))
 }
 
+pub(crate) fn format_duration_human(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs} seconds")
+    } else if secs < 3600 {
+        format!("{} minutes", secs / 60)
+    } else if secs < 86400 {
+        format!("{} hours", secs / 3600)
+    } else {
+        format!("{} days", secs / 86400)
+    }
+}
+
 pub(crate) fn merge_messages(msgs: &[String]) -> String {
     msgs.join("\n")
 }
@@ -167,6 +179,31 @@ pub(crate) fn extract_file_references(text: &str) -> Vec<PathBuf> {
         }
     }
     paths
+}
+
+pub(crate) fn parse_interval_secs(s: &str) -> Option<i64> {
+    parse_duration(s).map(|d| d.as_secs() as i64)
+}
+
+pub(crate) fn parse_daily_time(input: &str) -> Option<String> {
+    let parts: Vec<&str> = input.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let hour: u8 = parts[0].parse().ok()?;
+    let minute: u8 = parts[1].parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(format!("{minute} {hour} * * *"))
+}
+
+pub(crate) fn format_cron_human(pattern: &str) -> String {
+    use std::str::FromStr;
+    match croner::Cron::from_str(pattern) {
+        Ok(cron) => cron.pattern.to_string(),
+        Err(_) => pattern.to_string(),
+    }
 }
 
 pub(crate) fn isolated_workdir(sender: &str) -> PathBuf {
@@ -480,5 +517,61 @@ mod tests {
         let text = "Check /tmp/ccchat/nonexistent_file_xyz.txt for details.";
         let refs = extract_file_references(text);
         assert!(refs.is_empty());
+    }
+
+    // --- Cron helper tests ---
+
+    #[test]
+    fn test_parse_interval_secs_hourly() {
+        assert_eq!(parse_interval_secs("1h"), Some(3600));
+    }
+
+    #[test]
+    fn test_parse_interval_secs_minutes() {
+        assert_eq!(parse_interval_secs("30m"), Some(1800));
+    }
+
+    #[test]
+    fn test_parse_interval_secs_daily() {
+        assert_eq!(parse_interval_secs("1d"), Some(86400));
+    }
+
+    #[test]
+    fn test_parse_interval_secs_invalid() {
+        assert_eq!(parse_interval_secs("abc"), None);
+        assert_eq!(parse_interval_secs(""), None);
+    }
+
+    #[test]
+    fn test_parse_daily_time_valid() {
+        assert_eq!(parse_daily_time("09:00"), Some("0 9 * * *".to_string()));
+    }
+
+    #[test]
+    fn test_parse_daily_time_afternoon() {
+        assert_eq!(parse_daily_time("14:30"), Some("30 14 * * *".to_string()));
+    }
+
+    #[test]
+    fn test_parse_daily_time_invalid_hour() {
+        assert_eq!(parse_daily_time("25:00"), None);
+    }
+
+    #[test]
+    fn test_parse_daily_time_invalid_format() {
+        assert_eq!(parse_daily_time("nine"), None);
+        assert_eq!(parse_daily_time(""), None);
+    }
+
+    #[test]
+    fn test_format_cron_human_valid() {
+        let result = format_cron_human("0 9 * * *");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_format_cron_human_invalid_falls_back() {
+        let result = format_cron_human("not valid cron");
+        assert_eq!(result, "not valid cron");
     }
 }
