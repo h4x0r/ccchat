@@ -127,7 +127,6 @@ impl State {
             .fetch_add(micros, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)] // used in tests and stats endpoint
     pub(crate) fn sender_cost_usd(&self, sender: &str) -> f64 {
         self.sender_costs
             .get(sender)

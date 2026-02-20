@@ -14,21 +14,27 @@ use crate::memory::{
 use crate::signal::{classify_attachment, AttachmentType};
 use crate::state::{PendingSender, SenderState, State, TokenBucket};
 
-fn cmd_status(state: &State) -> String {
+fn cmd_status(state: &State, sender: &str) -> String {
     let uptime = state.metrics.start_time.elapsed();
     let hours = uptime.as_secs() / 3600;
     let mins = (uptime.as_secs() % 3600) / 60;
     let count = state.metrics.message_count.load(Ordering::Relaxed);
     let cost = state.total_cost_usd();
+    let sender_cost = state.sender_cost_usd(sender);
     let sessions = state.session_mgr.sessions.len();
     let allowed = state.allowed_ids.len();
+    let errors = state.metrics.error_count.load(Ordering::Relaxed);
+    let latency = state.avg_latency_ms();
     format!(
         "ccchat status\n\
          Uptime: {hours}h {mins}m\n\
          Messages: {count}\n\
          Active sessions: {sessions}\n\
          Allowed senders: {allowed}\n\
-         Total cost: ${cost:.4}"
+         Total cost: ${cost:.4}\n\
+         Your cost: ${sender_cost:.4}\n\
+         Errors: {errors}\n\
+         Avg latency: {latency:.0}ms"
     )
 }
 
@@ -301,7 +307,7 @@ pub(crate) fn handle_command(state: &State, sender: &str, text: &str) -> Option<
         return Some(cmd_help());
     }
     if text == "/status" {
-        return Some(cmd_status(state));
+        return Some(cmd_status(state, sender));
     }
     if text == "/pending" {
         return Some(cmd_pending(state));
@@ -684,6 +690,31 @@ mod tests {
         assert!(text.contains("Uptime:"));
         assert!(text.contains("Messages:"));
         assert!(text.contains("Total cost:"));
+    }
+
+    #[test]
+    fn test_status_includes_sender_cost() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        state.add_sender_cost("+allowed_user", 0.1234);
+        let text = handle_command(&state, "+allowed_user", "/status").unwrap();
+        assert!(text.contains("Your cost: $0.1234"), "got: {text}");
+    }
+
+    #[test]
+    fn test_status_includes_error_count() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        state.metrics.error_count.fetch_add(7, Ordering::Relaxed);
+        let text = handle_command(&state, "+allowed_user", "/status").unwrap();
+        assert!(text.contains("Errors: 7"), "got: {text}");
+    }
+
+    #[test]
+    fn test_status_includes_avg_latency() {
+        let state = test_state_with(MockSignalApi::new(), MockClaudeRunner::new());
+        state.record_latency(100);
+        state.record_latency(200);
+        let text = handle_command(&state, "+allowed_user", "/status").unwrap();
+        assert!(text.contains("Avg latency: 150ms"), "got: {text}");
     }
 
     #[test]
