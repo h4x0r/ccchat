@@ -1,4 +1,5 @@
 mod audit;
+mod background;
 mod commands;
 mod constants;
 mod error;
@@ -20,7 +21,7 @@ use reqwest::Client;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
@@ -28,8 +29,7 @@ use commands::{buffer_debounced, download_attachments, handle_message, handle_un
 use error::AppError;
 use helpers::{find_free_port, is_command, truncate, voice_prompt};
 use memory::{
-    allowed_file_path, load_config_file, load_persisted_allowed, open_memory_db,
-    purge_old_messages, reload_config_full, save_memory, validate_config_entries,
+    allowed_file_path, load_config_file, load_persisted_allowed, validate_config_entries,
 };
 use signal::{parse_envelope, ParsedEnvelope};
 use state::State;
@@ -370,112 +370,13 @@ async fn main() {
         claude_runner: Box::new(ClaudeRunnerImpl),
     });
 
-    // Spawn session reaper task if TTL is configured
+    // Spawn background tasks
     if let Some(ttl) = state.config.session_ttl {
-        let reaper_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                let now = Instant::now();
-                // Collect expired sessions for async summarization
-                let expired: Vec<(String, String)> = reaper_state
-                    .session_mgr
-                    .sessions
-                    .iter()
-                    .filter(|entry| now.duration_since(entry.value().last_activity) > ttl)
-                    .map(|entry| (entry.key().clone(), entry.value().session_id.clone()))
-                    .collect();
-                for (sender, session_id) in &expired {
-                    info!(sender = %sender, "Session expired by TTL reaper");
-                    if let Some(summary) = reaper_state
-                        .claude_runner
-                        .summarize_session(session_id, &reaper_state.config.model)
-                        .await
-                    {
-                        save_memory(sender, &summary);
-                        info!(sender = %sender, "Saved memory on expiry");
-                    }
-                    // Purge messages older than 30 days
-                    if let Ok(conn) = open_memory_db(sender) {
-                        purge_old_messages(&conn, 30);
-                    }
-                    reaper_state.session_mgr.sessions.remove(sender);
-                }
-            }
-        });
-    }
-
-    // Spawn SIGHUP handler for config hot-reload
-    #[cfg(unix)]
-    {
-        let reload_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-                .expect("Failed to register SIGHUP handler");
-            loop {
-                sig.recv().await;
-                info!("SIGHUP received, reloading config...");
-                let (added, removed) = reload_config_full(
-                    reload_state.config.config_path.as_deref(),
-                    &reload_state.config.account,
-                    &reload_state.allowed_ids,
-                    &reload_state.runtime_system_prompt,
-                    &reload_state.sender_prompts,
-                );
-                audit::log_action("config_reload", "", &format!("+{added} -{removed}"));
-                info!("Config reloaded: +{added} -{removed} senders");
-            }
-        });
-    }
-
-    // Spawn graceful shutdown handler (SIGINT/SIGTERM)
-    {
-        let shutdown_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to listen for ctrl-c");
-            audit::log_action("shutdown", "", "graceful");
-            webhook::fire_if_configured(
-                &shutdown_state.config.webhook_url,
-                "shutdown",
-                "",
-                "graceful",
-            );
-            info!("Shutdown signal received, saving active sessions...");
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                shutdown_state.shutdown_save_sessions(),
-            )
-            .await
-            {
-                Ok(()) => info!("Shutdown complete, all sessions saved"),
-                Err(_) => error!("Shutdown timed out after 30s"),
-            }
-            std::process::exit(0);
-        });
+        background::spawn_session_reaper(&state, ttl);
     }
     #[cfg(unix)]
-    {
-        let shutdown_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to register SIGTERM handler");
-            sig.recv().await;
-            audit::log_action("shutdown", "", "SIGTERM");
-            info!("SIGTERM received, saving active sessions...");
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                shutdown_state.shutdown_save_sessions(),
-            )
-            .await
-            {
-                Ok(()) => info!("Shutdown complete, all sessions saved"),
-                Err(_) => error!("Shutdown timed out after 30s"),
-            }
-            std::process::exit(0);
-        });
-    }
+    background::spawn_sighup_handler(&state);
+    background::spawn_shutdown_handler(&state);
 
     info!("ccchat starting for account {}", state.config.account);
     info!("Allowed list: {}", allowed_file_path().display());
@@ -494,46 +395,11 @@ async fn main() {
         info!("Debounce: {}ms", state.config.debounce_ms);
     }
 
-    // Spawn queue retry loop (every 30s)
-    {
-        let retry_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                commands::retry_pending_messages(&retry_state).await;
-            }
-        });
-    }
-
-    // Spawn reminder delivery loop (every 30s)
-    {
-        let reminder_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                commands::deliver_due_reminders(&reminder_state).await;
-            }
-        });
-    }
-
-    // Spawn cron job delivery loop (every 30s)
-    {
-        let cron_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                commands::deliver_due_cron_jobs(&cron_state).await;
-            }
-        });
-    }
-
-    // Spawn stats HTTP server if configured
+    background::spawn_retry_loop(&state);
+    background::spawn_reminder_loop(&state);
+    background::spawn_cron_loop(&state);
     if args.stats_port > 0 {
-        let stats_listener = tokio::net::TcpListener::bind(("127.0.0.1", args.stats_port))
-            .await
-            .expect("Failed to bind stats port");
-        let stats_state = state.clone();
-        tokio::spawn(stats::run_stats_server(stats_listener, stats_state));
+        background::spawn_stats_server(&state, args.stats_port).await;
     }
 
     let mut backoff = 1u64;
