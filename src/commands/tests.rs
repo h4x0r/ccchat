@@ -2,7 +2,7 @@ use super::*;
 use crate::memory::{delete_memory, open_memory_db, store_message};
 use crate::signal::AttachmentInfo;
 use crate::state::tests::test_state_with;
-use crate::state::PendingSender;
+use crate::state::{PendingSender, SenderState};
 use crate::traits::{MockClaudeRunner, MockSignalApi};
 
 // --- latency and error count tests ---
