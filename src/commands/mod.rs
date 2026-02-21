@@ -232,30 +232,86 @@ pub(crate) async fn handle_message(
     if check_rate_limit(state, sender).await? {
         return Ok(());
     }
+    if check_injection_guard(state, sender, text).await? {
+        return Ok(());
+    }
 
-    // ── Prompt injection guard ─────────────────────────────────────────
+    run_conversation(state, sender, text, attachments).await
+}
+
+/// Returns true (and sends a block message) if the injection guard fires.
+async fn check_injection_guard(state: &State, sender: &str, text: &str) -> Result<bool, AppError> {
     if let Some(ref lakera_key) = state.config.lakera_api_key {
         let (decision, msg) = crate::guard::run_guard(text, lakera_key, &state.http).await;
         if decision == crate::guard::GuardDecision::Block {
             state.send_message(sender, msg).await?;
-            return Ok(());
+            return Ok(true);
         }
     }
+    Ok(false)
+}
 
-    let _ = state.set_typing(sender, true).await;
-    let (session_id, model, lock, is_new_session) = state.get_or_create_session(sender);
-
+/// Build the prompt with memory context injection and recalled pin content.
+fn build_prompt(state: &State, sender: &str, text: &str, is_new_session: bool) -> String {
     let base_prompt = if is_new_session {
         inject_context(sender, text)
     } else {
         text.to_string()
     };
     let recalled = state.pending_recalls.remove(sender).map(|(_, v)| v);
-    let prompt = if let Some(ref pin_content) = recalled {
+    if let Some(ref pin_content) = recalled {
         format!("[Recalled context]\n{pin_content}\n\n[Current message]\n{base_prompt}")
     } else {
         base_prompt
+    }
+}
+
+/// Remove temporary attachment files after the Claude call.
+fn cleanup_attachments(attachments: &[PathBuf]) {
+    for path in attachments {
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::debug!("Failed to remove temp file {}: {e}", path.display());
+        }
+    }
+}
+
+/// Check if enough messages have passed to trigger an auto-summarize.
+async fn maybe_auto_summarize(state: &State, sender: &str, session_id: &str, model: &str) {
+    let should_summarize = {
+        if let Some(mut entry) = state.session_mgr.sessions.get_mut(sender) {
+            entry.message_count += 1;
+            if entry.message_count >= crate::constants::AUTO_SUMMARIZE_THRESHOLD {
+                entry.message_count = 0;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     };
+    if should_summarize {
+        if let Some(summary) = state
+            .claude_runner
+            .summarize_session(session_id, model)
+            .await
+        {
+            save_memory(sender, &summary);
+            info!(sender = %sender, "Auto-summarized mid-conversation");
+        }
+    }
+}
+
+/// Core conversation flow: typing indicator, prompt build, Claude call, response.
+async fn run_conversation(
+    state: &State,
+    sender: &str,
+    text: &str,
+    attachments: &[PathBuf],
+) -> Result<(), AppError> {
+    let _ = state.set_typing(sender, true).await;
+    let (session_id, model, lock, is_new_session) = state.get_or_create_session(sender);
+    let prompt = build_prompt(state, sender, text, is_new_session);
 
     let _guard = lock.lock().await;
     let system_prompt = state.get_system_prompt(sender);
@@ -274,41 +330,13 @@ pub(crate) async fn handle_message(
         .await;
     state.record_latency(call_start.elapsed().as_millis() as u64);
 
-    for path in attachments {
-        if let Err(e) = std::fs::remove_file(path) {
-            tracing::debug!("Failed to remove temp file {}: {e}", path.display());
-        }
-    }
+    cleanup_attachments(attachments);
     let _ = state.set_typing(sender, false).await;
 
     if let Ok((ref response, _)) = result {
         info!(sender = %sender, response_len = response.len(), "Reply sent");
         store_message_pair(sender, text, response, &session_id);
-
-        // Increment session message count and check for auto-summarize
-        let should_summarize = {
-            if let Some(mut entry) = state.session_mgr.sessions.get_mut(sender) {
-                entry.message_count += 1;
-                if entry.message_count >= crate::constants::AUTO_SUMMARIZE_THRESHOLD {
-                    entry.message_count = 0;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        };
-        if should_summarize {
-            if let Some(summary) = state
-                .claude_runner
-                .summarize_session(&session_id, &model)
-                .await
-            {
-                save_memory(sender, &summary);
-                info!(sender = %sender, "Auto-summarized mid-conversation");
-            }
-        }
+        maybe_auto_summarize(state, sender, &session_id, &model).await;
     }
 
     send_claude_response(state, sender, result, &session_id, &prompt).await
